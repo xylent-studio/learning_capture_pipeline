@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from som_seedtalent_capture.autopilot.capture_plan import CapturePlan
 from som_seedtalent_capture.artifacts import ArtifactRecord, RunArtifactLayout
 from som_seedtalent_capture.models import new_id
 
@@ -42,10 +43,16 @@ class FailureStage(StrEnum):
 
 class RunDiagnosticsSnapshot(BaseModel):
     current_url: str | None = None
+    page_title: str | None = None
     visible_state_summary: str | None = None
     screenshot_uri: str | None = None
     prohibited_path_detected: bool = False
     prohibited_path_hits: list[str] = Field(default_factory=list)
+    visible_headings: list[str] = Field(default_factory=list)
+    visible_buttons: list[str] = Field(default_factory=list)
+    visible_links: list[str] = Field(default_factory=list)
+    classifier_page_kind: str | None = None
+    classifier_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -85,6 +92,7 @@ class PilotRunManifest(BaseModel):
     rights_status: str
     account_alias: str
     lifecycle_status: PilotRunStatus = PilotRunStatus.QUEUED
+    capture_plan: CapturePlan | None = None
     artifact_layout: RunArtifactLayout
     planned_artifacts: list[ArtifactRecord] = Field(default_factory=list)
     runtime_config_path: str
@@ -103,6 +111,11 @@ class PilotRunManifest(BaseModel):
     duration_ms: int | None = Field(default=None, ge=0)
     page_observation_count: int = Field(default=0, ge=0)
     screenshot_uris: list[str] = Field(default_factory=list)
+    observed_page_kinds: list[str] = Field(default_factory=list)
+    visited_logical_urls: list[str] = Field(default_factory=list)
+    completion_detected: bool = False
+    unknown_ui_state_detected: bool = False
+    runner_stop_reason: str | None = None
     created_at: datetime = Field(default_factory=_now_utc)
     updated_at: datetime = Field(default_factory=_now_utc)
 

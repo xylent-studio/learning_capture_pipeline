@@ -12,7 +12,9 @@ from som_seedtalent_capture import __version__
 from som_seedtalent_capture.artifacts import ArtifactKind, ArtifactRecord, LocalArtifactStore, RunArtifactLayout
 from som_seedtalent_capture.autopilot.capture_plan import CapturePlan, QaThresholds, QuizCaptureMode, RecorderProfile
 from som_seedtalent_capture.autopilot.course_discovery import CourseDiscoveryResult, CourseInventoryItem
+from som_seedtalent_capture.autopilot.recorder import FFmpegRecorderProvider, FakeRecorderProvider, ObsRecorderProvider, RecorderProvider
 from som_seedtalent_capture.autopilot.qa import AutopilotQAResult, evaluate_pilot_run_manifest
+from som_seedtalent_capture.autopilot.runner import AutopilotRunResult, run_visible_session_autopilot
 from som_seedtalent_capture.autopilot.state_machine import PageKind, PageObservation
 from som_seedtalent_capture.auth import AuthPreflightResult, AuthPreflightStatus, PlaywrightVisibleAuthPreflight, run_auth_preflight
 from som_seedtalent_capture.config import PilotCourseSelection, RuntimePilotConfig
@@ -102,6 +104,28 @@ def _diagnostics_snapshot_from_preflight(result: AuthPreflightResult, config: Ru
     )
 
 
+def _diagnostics_snapshot_from_run_result(result: AutopilotRunResult, config: RuntimePilotConfig) -> RunDiagnosticsSnapshot:
+    latest_snapshot = result.page_snapshots[-1] if result.page_snapshots else None
+    latest_observation = result.observations[-1] if result.observations else None
+    current_url = latest_snapshot.execution_url if latest_snapshot else (result.visited_execution_urls[-1] if result.visited_execution_urls else None)
+    hits = [pattern for pattern in config.tuning.prohibited_path_patterns if current_url and pattern in current_url]
+    notes = [note for note in [result.stopped_reason] if note]
+    return RunDiagnosticsSnapshot(
+        current_url=current_url,
+        page_title=latest_snapshot.title if latest_snapshot else None,
+        visible_state_summary=(latest_snapshot.visible_text[:500] if latest_snapshot else None),
+        screenshot_uri=latest_snapshot.screenshot_uri if latest_snapshot else None,
+        prohibited_path_detected=bool(hits),
+        prohibited_path_hits=hits,
+        visible_headings=latest_snapshot.headings[:10] if latest_snapshot else [],
+        visible_buttons=latest_snapshot.buttons[:12] if latest_snapshot else [],
+        visible_links=latest_snapshot.links[:12] if latest_snapshot else [],
+        classifier_page_kind=latest_observation.page_kind.value if latest_observation else None,
+        classifier_confidence=latest_observation.confidence if latest_observation else None,
+        notes=notes,
+    )
+
+
 def _suggest_next_action(result: AuthPreflightResult) -> str:
     if result.status == AuthPreflightStatus.AUTH_EXPIRED:
         return "Refresh the headed browser session and save a new external storage-state file."
@@ -175,6 +199,7 @@ def _build_run_manifest(
         permission_basis=plan.permission_basis,
         rights_status=plan.rights_status.value,
         account_alias=account_alias,
+        capture_plan=plan,
         artifact_layout=layout,
         planned_artifacts=planned_artifacts,
         runtime_config_path=str(Path(runtime_config_path).resolve()),
@@ -260,6 +285,84 @@ def _write_failure_bundle(
     path = _failure_bundle_path(run_manifest.artifact_layout)
     write_model_json(path, bundle)
     return bundle
+
+
+def _recorder_provider_for_profile(profile: RecorderProfile) -> RecorderProvider | None:
+    if profile == RecorderProfile.FIXTURE_NOOP:
+        return FakeRecorderProvider()
+    if profile == RecorderProfile.HEADED_BROWSER_OBS:
+        return ObsRecorderProvider()
+    if profile == RecorderProfile.HEADED_BROWSER_FFMPEG:
+        return FFmpegRecorderProvider()
+    return None
+
+
+def _update_run_manifest_from_execution(
+    *,
+    run_manifest: PilotRunManifest,
+    run_result: AutopilotRunResult,
+    diagnostics_snapshot: RunDiagnosticsSnapshot,
+) -> PilotRunManifest:
+    planned_artifacts = list(run_manifest.planned_artifacts)
+    screen_recording = _artifact_record_by_kind(planned_artifacts, ArtifactKind.SCREEN_RECORDING)
+    audio_recording = _artifact_record_by_kind(planned_artifacts, ArtifactKind.AUDIO_RECORDING)
+
+    if run_result.recorder_session is not None and screen_recording is not None:
+        screen_recording = screen_recording.model_copy(
+            update={"local_path": run_result.recorder_session.video_uri},
+            deep=True,
+        )
+        planned_artifacts = _replace_artifact_record(planned_artifacts, screen_recording)
+    if run_result.recorder_session is not None and audio_recording is not None and run_result.recorder_session.audio_uri is not None:
+        audio_recording = audio_recording.model_copy(
+            update={"local_path": run_result.recorder_session.audio_uri},
+            deep=True,
+        )
+        planned_artifacts = _replace_artifact_record(planned_artifacts, audio_recording)
+
+    unique_screenshots = list(dict.fromkeys(snapshot.screenshot_uri for snapshot in run_result.page_snapshots))
+    duration_ms = max((event.timestamp_ms for event in run_result.events), default=0)
+
+    return run_manifest.model_copy(
+        update={
+            "planned_artifacts": planned_artifacts,
+            "runner_executed": True,
+            "duration_ms": duration_ms,
+            "page_observation_count": len(run_result.observations),
+            "screenshot_uris": unique_screenshots,
+            "observed_page_kinds": [observation.page_kind.value for observation in run_result.observations],
+            "visited_logical_urls": run_result.visited_logical_urls,
+            "completion_detected": run_result.completion_detected,
+            "unknown_ui_state_detected": run_result.unknown_ui_state_detected,
+            "runner_stop_reason": run_result.stopped_reason,
+            "diagnostics_snapshot": diagnostics_snapshot,
+        },
+        deep=True,
+    )
+
+
+def _load_batch_manifest(path: str | Path) -> PilotBatchManifest:
+    return read_model_json(path, PilotBatchManifest)  # type: ignore[return-value]
+
+
+def _collect_batch_run_manifests(batch_manifest: PilotBatchManifest, updated_run_manifest: PilotRunManifest) -> list[PilotRunManifest]:
+    manifests: list[PilotRunManifest] = []
+    updated_run_manifest_path = str(Path(updated_run_manifest.run_manifest_path or _run_manifest_path(updated_run_manifest.artifact_layout)).resolve())
+    seen_updated = False
+
+    for path in batch_manifest.run_manifest_paths:
+        resolved = str(Path(path).resolve())
+        if resolved == updated_run_manifest_path:
+            manifests.append(updated_run_manifest)
+            seen_updated = True
+            continue
+        target = Path(resolved)
+        if target.exists():
+            manifests.append(read_model_json(target, PilotRunManifest))  # type: ignore[arg-type]
+
+    if not seen_updated:
+        manifests.append(updated_run_manifest)
+    return manifests
 
 
 def _run_auth_preflight_for_path(
@@ -598,6 +701,168 @@ def run_pilot_course_skeleton(
     return PilotRunSummary(
         batch_manifest_path=str(_batch_manifest_path(layout.batch_root).resolve()),
         run_manifest_path=str(_run_manifest_path(layout).resolve()),
+        status=run_manifest.lifecycle_status,
+        qa_readiness_status=qa_result.readiness_status.value,
+        failure_bundle_path=failure_bundle_path,
+    )
+
+
+def execute_pilot_course(
+    *,
+    config: RuntimePilotConfig,
+    run_manifest_path: str | Path,
+    headless: bool = True,
+    database_url: str | None = None,
+) -> PilotRunSummary:
+    run_manifest = read_model_json(run_manifest_path, PilotRunManifest)  # type: ignore[assignment]
+    if run_manifest.capture_plan is None:
+        raise ValueError("run manifest is missing capture_plan and cannot be executed")
+
+    run_manifest = run_manifest.model_copy(update={"run_manifest_path": str(Path(run_manifest_path).resolve())}, deep=True)
+    batch_manifest_path = _batch_manifest_path(run_manifest.artifact_layout.batch_root)
+    batch_manifest = _load_batch_manifest(batch_manifest_path)
+
+    preflight_result = _run_auth_preflight_for_path(
+        config=config,
+        screenshot_dir=run_manifest.artifact_layout.preflight_dir,
+        repo_root=Path.cwd(),
+        account_alias=config.account_alias,
+        headless=headless,
+    )
+    preflight_path = write_model_json(_preflight_result_path(run_manifest.artifact_layout), preflight_result)
+    diagnostics_snapshot = _diagnostics_snapshot_from_preflight(preflight_result, config)
+    diagnostics_path = write_model_json(
+        Path(run_manifest.artifact_layout.diagnostics_dir) / "diagnostics-snapshot.json",
+        diagnostics_snapshot,
+    )
+    run_manifest = run_manifest.model_copy(
+        update={
+            "preflight_result_path": str(preflight_path.resolve()),
+            "preflight_status": preflight_result.status.value,
+            "preflight_error_reason": preflight_result.error_reason,
+            "diagnostics_snapshot_path": str(diagnostics_path.resolve()),
+            "diagnostics_snapshot": diagnostics_snapshot,
+        },
+        deep=True,
+    )
+    run_manifest = _reconcile_runtime_artifacts(
+        run_manifest=run_manifest,
+        preflight_result=preflight_result,
+        diagnostics_path=diagnostics_path,
+    )
+
+    failure_bundle_path: str | None = None
+    qa_result: AutopilotQAResult
+
+    if preflight_result.status != AuthPreflightStatus.AUTHENTICATED:
+        run_manifest = run_manifest.model_copy(update={"lifecycle_status": PilotRunStatus.PREFLIGHT_FAILED}, deep=True)
+        _write_processing_manifest(run_manifest)
+        _write_failure_bundle(
+            run_manifest=run_manifest,
+            stage=FailureStage.RUN_PREFLIGHT,
+            auth_preflight_result=preflight_result,
+            diagnostics_snapshot=diagnostics_snapshot,
+        )
+        failure_bundle_path = str(_failure_bundle_path(run_manifest.artifact_layout).resolve())
+        run_manifest = run_manifest.model_copy(update={"failure_bundle_path": failure_bundle_path}, deep=True)
+        qa_result = _write_qa_report(run_manifest)
+    else:
+        try:
+            run_result = run_visible_session_autopilot(
+                plan=run_manifest.capture_plan,
+                artifact_root=run_manifest.artifact_layout.run_root,
+                storage_state_path=config.external_paths.storage_state_path,
+                headless=headless,
+                recorder_provider=_recorder_provider_for_profile(run_manifest.capture_plan.recorder_profile),
+            )
+            diagnostics_snapshot = _diagnostics_snapshot_from_run_result(run_result, config)
+            diagnostics_path = write_model_json(
+                Path(run_manifest.artifact_layout.diagnostics_dir) / "diagnostics-snapshot.json",
+                diagnostics_snapshot,
+            )
+            run_manifest = _update_run_manifest_from_execution(
+                run_manifest=run_manifest,
+                run_result=run_result,
+                diagnostics_snapshot=diagnostics_snapshot,
+            )
+            run_manifest = run_manifest.model_copy(
+                update={
+                    "lifecycle_status": PilotRunStatus.COMPLETED,
+                    "diagnostics_snapshot_path": str(diagnostics_path.resolve()),
+                },
+                deep=True,
+            )
+            _write_processing_manifest(run_manifest)
+            qa_result = _write_qa_report(run_manifest)
+            lifecycle_status = (
+                PilotRunStatus.COMPLETED
+                if qa_result.readiness_status.value == "ready_for_reconstruction"
+                else PilotRunStatus.NEEDS_RECAPTURE
+            )
+            run_manifest = run_manifest.model_copy(
+                update={
+                    "lifecycle_status": lifecycle_status,
+                    "recapture_reasons": [reason.value for reason in qa_result.recapture_reasons],
+                },
+                deep=True,
+            )
+            if run_manifest.unknown_ui_state_detected or diagnostics_snapshot.prohibited_path_detected:
+                _write_failure_bundle(
+                    run_manifest=run_manifest,
+                    stage=FailureStage.RUNNER,
+                    auth_preflight_result=preflight_result,
+                    diagnostics_snapshot=diagnostics_snapshot,
+                )
+                failure_bundle_path = str(_failure_bundle_path(run_manifest.artifact_layout).resolve())
+                run_manifest = run_manifest.model_copy(update={"failure_bundle_path": failure_bundle_path}, deep=True)
+        except Exception as exc:
+            run_manifest = run_manifest.model_copy(
+                update={
+                    "runner_executed": True,
+                    "lifecycle_status": PilotRunStatus.NEEDS_RECAPTURE,
+                    "runner_stop_reason": exc.__class__.__name__,
+                },
+                deep=True,
+            )
+            _write_processing_manifest(run_manifest)
+            _write_failure_bundle(
+                run_manifest=run_manifest,
+                stage=FailureStage.RUNNER,
+                auth_preflight_result=preflight_result,
+                diagnostics_snapshot=diagnostics_snapshot,
+                error_type=exc.__class__.__name__,
+                error_message=str(exc),
+            )
+            failure_bundle_path = str(_failure_bundle_path(run_manifest.artifact_layout).resolve())
+            run_manifest = run_manifest.model_copy(update={"failure_bundle_path": failure_bundle_path}, deep=True)
+            qa_result = _write_qa_report(run_manifest)
+
+    write_model_json(_run_manifest_path(run_manifest.artifact_layout), run_manifest)
+    batch_run_manifests = _collect_batch_run_manifests(batch_manifest, run_manifest)
+    batch_status = (
+        PilotBatchStatus.COMPLETED
+        if all(item.lifecycle_status == PilotRunStatus.COMPLETED for item in batch_run_manifests)
+        else PilotBatchStatus.NEEDS_RECAPTURE
+        if any(item.lifecycle_status == PilotRunStatus.NEEDS_RECAPTURE for item in batch_run_manifests)
+        else PilotBatchStatus.PREFLIGHT_FAILED
+        if any(item.lifecycle_status in {PilotRunStatus.PREFLIGHT_FAILED, PilotRunStatus.BLOCKED_BY_AUTH} for item in batch_run_manifests)
+        else PilotBatchStatus.READY_FOR_LIVE_CAPTURE
+    )
+    batch_manifest = _update_batch_counts(
+        batch_manifest.model_copy(update={"batch_status": batch_status}, deep=True),
+        batch_run_manifests,
+    )
+    write_model_json(batch_manifest_path, batch_manifest)
+    persist_pilot_records(
+        database_url=database_url,
+        batch_manifest=batch_manifest,
+        run_manifests=batch_run_manifests,
+        qa_results={run_manifest.run_id: qa_result},
+    )
+
+    return PilotRunSummary(
+        batch_manifest_path=str(batch_manifest_path.resolve()),
+        run_manifest_path=str(_run_manifest_path(run_manifest.artifact_layout).resolve()),
         status=run_manifest.lifecycle_status,
         qa_readiness_status=qa_result.readiness_status.value,
         failure_bundle_path=failure_bundle_path,

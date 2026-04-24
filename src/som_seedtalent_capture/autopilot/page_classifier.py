@@ -13,6 +13,7 @@ class VisibleDomSnapshot(BaseModel):
     title: str | None = None
     data_page_kind: str | None = None
     visible_text: str = ""
+    headings: list[str] = Field(default_factory=list)
     buttons: list[str] = Field(default_factory=list)
     links: list[str] = Field(default_factory=list)
     media: MediaSummary = Field(default_factory=MediaSummary)
@@ -33,7 +34,10 @@ class _FixtureHtmlParser(HTMLParser):
         self._inside_link = False
         self._current_button_text: list[str] = []
         self._current_link_text: list[str] = []
+        self._inside_heading = False
+        self._current_heading_text: list[str] = []
         self._text_chunks: list[str] = []
+        self.headings: list[str] = []
         self.buttons: list[str] = []
         self.links: list[str] = []
         self.media = MediaSummary()
@@ -45,6 +49,9 @@ class _FixtureHtmlParser(HTMLParser):
             self.data_page_kind = attr_map.get("data-page-kind")
         elif tag == "title":
             self._inside_title = True
+        elif tag in {"h1", "h2", "h3"}:
+            self._inside_heading = True
+            self._current_heading_text = []
         elif tag == "button":
             self._inside_button = True
             self._current_button_text = []
@@ -59,6 +66,11 @@ class _FixtureHtmlParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag == "title":
             self._inside_title = False
+        elif tag in {"h1", "h2", "h3"}:
+            self._inside_heading = False
+            heading_text = " ".join(self._current_heading_text).strip()
+            if heading_text:
+                self.headings.append(heading_text)
         elif tag == "button":
             self._inside_button = False
             button_text = " ".join(self._current_button_text).strip()
@@ -80,6 +92,8 @@ class _FixtureHtmlParser(HTMLParser):
 
         self._text_chunks.append(cleaned)
 
+        if self._inside_heading:
+            self._current_heading_text.append(cleaned)
         if self._inside_button:
             self._current_button_text.append(cleaned)
         if self._inside_link:
@@ -90,6 +104,7 @@ class _FixtureHtmlParser(HTMLParser):
             title=self.title,
             data_page_kind=self.data_page_kind,
             visible_text=" ".join(self._text_chunks),
+            headings=self.headings,
             buttons=self.buttons,
             links=self.links,
             media=self.media,
@@ -125,6 +140,7 @@ def _classify_by_visible_signals(snapshot: VisibleDomSnapshot) -> tuple[PageKind
     haystack = " ".join(
         [
             snapshot.title or "",
+            " ".join(snapshot.headings),
             snapshot.visible_text,
             " ".join(snapshot.buttons),
             " ".join(snapshot.links),
@@ -162,6 +178,62 @@ def _classify_by_visible_signals(snapshot: VisibleDomSnapshot) -> tuple[PageKind
         return PageKind.COMPLETION_PAGE, 0.95
 
     return PageKind.UNKNOWN, 0.2
+
+
+def classify_visible_page(
+    *,
+    url: str,
+    snapshot: VisibleDomSnapshot,
+    screenshot_uri: str | None = None,
+) -> PageObservation:
+    haystack = " ".join(
+        [
+            snapshot.title or "",
+            " ".join(snapshot.headings),
+            snapshot.visible_text,
+            " ".join(snapshot.buttons),
+            " ".join(snapshot.links),
+        ]
+    ).lower()
+
+    if any(token in haystack for token in {"sign in", "log in", "login", "session expired"}):
+        page_kind, confidence = PageKind.AUTH_REQUIRED, 0.96
+    elif "assigned learning" in haystack:
+        page_kind, confidence = PageKind.ASSIGNED_LEARNING, 0.92
+    elif "catalog" in haystack and ("course" in haystack or snapshot.links):
+        page_kind, confidence = PageKind.CATALOG, 0.85
+    elif any(token in haystack for token in {"course overview", "start course", "begin course", "resume course"}):
+        page_kind, confidence = PageKind.COURSE_OVERVIEW, 0.85
+    elif any(token in haystack for token in {"lesson list", "curriculum", "lessons"}) and len(snapshot.links) >= 1:
+        page_kind, confidence = PageKind.LESSON_LIST, 0.8
+    elif snapshot.media.count > 0 and any("audio" in token.lower() for token in [snapshot.title or "", *snapshot.headings, *snapshot.buttons]):
+        page_kind, confidence = PageKind.LESSON_AUDIO, 0.82
+    elif snapshot.media.count > 0 or any("video" in token.lower() for token in [snapshot.title or "", *snapshot.headings, *snapshot.buttons]):
+        page_kind, confidence = PageKind.LESSON_VIDEO, 0.82
+    elif "submit" in haystack and any(token in haystack for token in {"quiz", "question", "knowledge check", "assessment"}):
+        page_kind, confidence = PageKind.QUIZ_QUESTION, 0.82
+    elif any(token in haystack for token in {"correct", "incorrect", "feedback"}) and "continue" in haystack:
+        page_kind, confidence = PageKind.QUIZ_FEEDBACK, 0.8
+    elif any(token in haystack for token in {"completion", "completed", "certificate"}):
+        page_kind, confidence = PageKind.COMPLETION_PAGE, 0.88
+    elif any(token in haystack for token in {"report", "export csv", "export", "completion report"}):
+        page_kind, confidence = PageKind.REPORT_TABLE, 0.8
+    elif any(token in haystack for token in {"next", "continue", "lesson", "module"}):
+        page_kind, confidence = PageKind.LESSON_STATIC_TEXT, 0.62
+    else:
+        page_kind, confidence = PageKind.UNKNOWN, 0.2
+
+    return PageObservation(
+        url=url,
+        title=snapshot.title,
+        page_kind=page_kind,
+        visible_text_sample=snapshot.visible_text[:300],
+        buttons=snapshot.buttons,
+        links=snapshot.links,
+        media=snapshot.media,
+        screenshot_uri=screenshot_uri,
+        confidence=confidence,
+    )
 
 
 def classify_fixture_page(

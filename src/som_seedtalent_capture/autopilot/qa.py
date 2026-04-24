@@ -144,6 +144,15 @@ def evaluate_pilot_run_manifest(
 
     screenshot_count = len(run_manifest.screenshot_uris)
     duplicate_screenshots = screenshot_count != len(set(run_manifest.screenshot_uris))
+    observed_page_kinds = set(run_manifest.observed_page_kinds)
+    audio_artifact = next(
+        (
+            artifact
+            for artifact in run_manifest.planned_artifacts
+            if artifact.kind == ArtifactKind.AUDIO_RECORDING
+        ),
+        None,
+    )
 
     if run_manifest.preflight_status in {"failed", "auth_expired", "prohibited_path"} or run_manifest.lifecycle_status in {
         PilotRunStatus.PREFLIGHT_FAILED,
@@ -165,6 +174,22 @@ def evaluate_pilot_run_manifest(
 
     if missing_planned_artifacts:
         recapture_reasons.append(RecaptureReason.MISSING_PLANNED_ARTIFACTS)
+
+    if run_manifest.runner_executed and not run_manifest.completion_detected:
+        recapture_reasons.append(RecaptureReason.COMPLETION_NOT_DETECTED)
+
+    if run_manifest.unknown_ui_state_detected:
+        recapture_reasons.append(RecaptureReason.UNKNOWN_UI_STATE)
+
+    if {"lesson_video", "lesson_audio"} & observed_page_kinds and (audio_artifact is None or not Path(audio_artifact.local_path).exists()):
+        recapture_reasons.append(RecaptureReason.MISSING_AUDIO)
+
+    if (
+        run_manifest.capture_plan is not None
+        and run_manifest.capture_plan.expected_lesson_count is not None
+        and len(set(run_manifest.visited_logical_urls)) != run_manifest.capture_plan.expected_lesson_count
+    ):
+        recapture_reasons.append(RecaptureReason.LESSON_COUNT_MISMATCH)
 
     if not run_manifest.runner_executed and run_manifest.lifecycle_status == PilotRunStatus.READY_FOR_LIVE_CAPTURE:
         warnings.append(RecaptureReason.RUNNER_NOT_EXECUTED.value)
