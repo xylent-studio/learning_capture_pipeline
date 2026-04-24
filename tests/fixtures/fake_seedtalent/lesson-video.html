@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Opening Walkthrough Video</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body data-page-kind="lesson_video">
+    <header>
+      <p>Video Lesson</p>
+      <h1>Opening Walkthrough Video</h1>
+      <nav>
+        <a href="lesson-list.html">Lesson List</a>
+        <a href="lesson-audio.html">Next Lesson</a>
+      </nav>
+    </header>
+    <main>
+      <section class="panel">
+        <p class="progress">Duration: 4 minutes</p>
+        <p>Visible player controls and a fake media element are present for automation tests.</p>
+        <div class="player" role="group" aria-label="Video player">
+          <video controls preload="metadata" data-fixture-kind="video" aria-label="Opening walkthrough video"></video>
+          <div>
+            <button type="button">Play Lesson Video</button>
+            <button type="button">Pause</button>
+            <button type="button" onclick="window.location.href='lesson-audio.html'">Next</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

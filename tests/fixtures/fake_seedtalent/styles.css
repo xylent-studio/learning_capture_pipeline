@@ -1,0 +1,78 @@
+body {
+  font-family: "Segoe UI", Arial, sans-serif;
+  margin: 0;
+  background: #f3f0e8;
+  color: #1f2a1f;
+}
+
+header,
+main,
+footer {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+header {
+  background: #23412d;
+  color: #f7f4eb;
+}
+
+nav a,
+.button-link,
+button {
+  display: inline-block;
+  margin: 8px 12px 8px 0;
+  padding: 10px 14px;
+  border-radius: 999px;
+  text-decoration: none;
+  border: 1px solid #23412d;
+  background: #f7f4eb;
+  color: #23412d;
+  cursor: pointer;
+}
+
+.panel,
+.lesson-card,
+.course-card,
+.report-card {
+  background: #fffdf7;
+  border: 1px solid #d8d1c1;
+  border-radius: 16px;
+  padding: 20px;
+  margin: 16px 0;
+}
+
+.progress {
+  font-weight: 700;
+  color: #7a4f1a;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  border: 1px solid #d8d1c1;
+  padding: 10px;
+  text-align: left;
+}
+
+.player {
+  background: #1b1f23;
+  color: #f9fafb;
+  border-radius: 16px;
+  padding: 20px;
+  margin-top: 16px;
+}
+
+.quiz-option {
+  display: block;
+  padding: 12px;
+  margin: 10px 0;
+  border: 1px solid #c7bda7;
+  border-radius: 12px;
+  background: #fff;
+}
