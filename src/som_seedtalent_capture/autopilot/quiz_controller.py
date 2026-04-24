@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from playwright.sync_api import Page
+from playwright.sync_api import Error, Page
 from pydantic import BaseModel, Field
 
 from som_seedtalent_capture.autopilot.capture_plan import QuizCaptureMode
@@ -194,20 +194,42 @@ def _click_label_for_option(surface: Any, option_text: str) -> bool:
 
 
 def _click_progression_control(surface: Any, page: Page, labels: list[str]) -> str | None:
+    selector = "button, a, [role='button']"
     for label in labels:
         pattern = re.compile(label, re.IGNORECASE)
-        button = surface.get_by_role("button", name=pattern).first
-        if button.count() > 0:
-            clicked = button.inner_text().strip()
-            button.click()
-            page.wait_for_timeout(750)
-            return clicked
-        visible = surface.locator("button:visible").filter(has_text=pattern).first
-        if visible.count() > 0:
-            clicked = visible.inner_text().strip()
-            visible.click()
-            page.wait_for_timeout(750)
-            return clicked
+        candidates = surface.locator(selector).filter(has_text=pattern)
+        for index in range(candidates.count()):
+            candidate = candidates.nth(index)
+            try:
+                text = candidate.inner_text().strip()
+            except Error:
+                continue
+            if not text or not pattern.search(text):
+                continue
+            try:
+                if not candidate.is_visible():
+                    continue
+                if not candidate.is_enabled():
+                    continue
+            except Error:
+                continue
+            try:
+                aria_hidden = candidate.get_attribute("aria-hidden")
+                aria_disabled = candidate.get_attribute("aria-disabled")
+                class_name = candidate.get_attribute("class") or ""
+            except Error:
+                continue
+            if aria_hidden == "true" or aria_disabled == "true":
+                continue
+            if "visually-hidden" in class_name.lower():
+                continue
+            try:
+                candidate.scroll_into_view_if_needed(timeout=2000)
+                candidate.click(timeout=3000)
+                page.wait_for_timeout(750)
+                return text
+            except Error:
+                continue
     return None
 
 

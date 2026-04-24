@@ -145,9 +145,15 @@ def test_live_quiz_controller_uses_evidence_grounded_answering(tmp_path: Path):
 
 
 def test_live_quiz_controller_results_state_prefers_next_over_take_again(monkeypatch, tmp_path: Path):
+    del monkeypatch
+
     class _FakeSurface:
         def __init__(self) -> None:
-            self._buttons = ["NEXT", "TAKE AGAIN"]
+            self._buttons = [
+                {"text": "NEXT", "visible": True, "enabled": False, "aria_hidden": "true", "aria_disabled": "true", "class_name": "visually-hidden-always"},
+                {"text": "CONTINUE", "visible": True, "enabled": True, "aria_hidden": "false", "aria_disabled": "false", "class_name": ""},
+                {"text": "TAKE AGAIN", "visible": True, "enabled": True, "aria_hidden": "false", "aria_disabled": "false", "class_name": ""},
+            ]
 
         def locator(self, selector: str):
             class _Locator:
@@ -158,28 +164,33 @@ def test_live_quiz_controller_results_state_prefers_next_over_take_again(monkeyp
                     return "Quiz Results\nYour score 0%\nFailed"
 
                 def all_inner_texts(self):
-                    return self._values
+                    return [value["text"] for value in self._values]
 
                 @property
                 def first(self):
-                    return self
+                    return _ClickLocator(self._values[0] if self._values else None)
 
                 def count(self):
-                    return 0
+                    return len(self._values)
+
+                def nth(self, index: int):
+                    return _ClickLocator(self._values[index])
 
                 def filter(self, has_text):  # noqa: ANN001
                     for value in self._values:
-                        if has_text.search(value):
-                            return _ClickLocator(value)
-                    return _ClickLocator(None)
+                        if has_text.search(value["text"]):
+                            return _Locator([value])
+                    return _Locator([])
 
             if selector == "body":
                 return _Locator([])
             if selector == "h1:visible, h2:visible, h3:visible":
-                return _Locator(["Quiz Results"])
+                return _Locator([{"text": "Quiz Results"}])
             if selector == "label:visible":
                 return _Locator([])
             if selector == "button:visible":
+                return _Locator(self._buttons)
+            if selector == "button, a, [role='button']":
                 return _Locator(self._buttons)
             raise AssertionError(selector)
 
@@ -187,25 +198,45 @@ def test_live_quiz_controller_results_state_prefers_next_over_take_again(monkeyp
             if role != "button":
                 return _ClickLocator(None)
             for button in self._buttons:
-                if name.search(button):
+                if name.search(button["text"]):
                     return _ClickLocator(button)
             return _ClickLocator(None)
 
     class _ClickLocator:
-        def __init__(self, text: str | None) -> None:
-            self._text = text
+        def __init__(self, button: dict[str, str | bool] | None) -> None:
+            self._button = button
 
         @property
         def first(self):
             return self
 
         def count(self):
-            return 1 if self._text else 0
+            return 1 if self._button else 0
 
         def inner_text(self):
-            return self._text or ""
+            return "" if self._button is None else str(self._button["text"])
 
-        def click(self, force: bool = False):  # noqa: ARG002
+        def is_visible(self):
+            return False if self._button is None else bool(self._button["visible"])
+
+        def is_enabled(self):
+            return False if self._button is None else bool(self._button["enabled"])
+
+        def get_attribute(self, name: str):
+            if self._button is None:
+                return None
+            if name == "aria-hidden":
+                return str(self._button["aria_hidden"])
+            if name == "aria-disabled":
+                return str(self._button["aria_disabled"])
+            if name == "class":
+                return str(self._button["class_name"])
+            return None
+
+        def scroll_into_view_if_needed(self, timeout: int = 0):  # noqa: ARG002
+            return None
+
+        def click(self, force: bool = False, timeout: int = 0):  # noqa: ARG002
             return None
 
     class _FakePage:
@@ -228,7 +259,7 @@ def test_live_quiz_controller_results_state_prefers_next_over_take_again(monkeyp
         evidence_snippets=[],
     )
 
-    assert result.applied_action_label == "NEXT"
+    assert result.applied_action_label == "CONTINUE"
     assert result.advanced_to_next is True
 
 
