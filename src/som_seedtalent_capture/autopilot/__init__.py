@@ -1,3 +1,10 @@
+from som_seedtalent_capture.autopilot.course_discovery import (
+    CourseDiscoveryResult,
+    CourseInventoryItem,
+    DiscoveredCourseCard,
+    discover_fixture_courses,
+    discover_fixture_courses_from_file,
+)
 from som_seedtalent_capture.autopilot.page_classifier import (
     FixtureHtmlExtractor,
     VisibleDomSnapshot,
@@ -13,6 +20,9 @@ from som_seedtalent_capture.autopilot.state_machine import (
 
 __all__ = [
     "AutopilotState",
+    "CourseDiscoveryResult",
+    "CourseInventoryItem",
+    "DiscoveredCourseCard",
     "FixtureHtmlExtractor",
     "NavigationAction",
     "PageKind",
@@ -20,4 +30,6 @@ __all__ = [
     "VisibleDomSnapshot",
     "classify_fixture_page",
     "decide_next_action",
+    "discover_fixture_courses",
+    "discover_fixture_courses_from_file",
 ]
