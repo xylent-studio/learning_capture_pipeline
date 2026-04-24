@@ -1,0 +1,11 @@
+# Copy to .codex/config.toml if wanted. Keep secrets out of this file.
+# Tune settings to your local Codex workflow.
+
+[profiles.seedtalent-capture]
+# Keep approvals and sandboxing conservative until the workflow is proven.
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[features]
+# child_agents_md can make nested AGENTS.md precedence more explicit when used.
+child_agents_md = true
