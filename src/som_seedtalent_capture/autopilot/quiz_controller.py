@@ -430,7 +430,7 @@ class LiveQuizController:
             and self.history[-1].answer_strategy == "feedback_retry_reset"
             and self.history[-1].question_text == question_text
         )
-        if prior_feedback and _has_retry_feedback_markers(body_text) and any(control.lower() == "take again" for control in controls) and not retry_reset_recent:
+        if _has_retry_feedback_markers(body_text) and any(control.lower() == "take again" for control in controls) and not retry_reset_recent:
             clicked_retry = _click_progression_control(surface, page, ["take again"])
             result = QuizCaptureResult(
                 mode=self.mode,

@@ -6,7 +6,7 @@ from playwright.sync_api import Error, sync_playwright
 from som_seedtalent_capture.autopilot.capture_plan import QuizCaptureMode, build_fixture_capture_plan_from_file
 from som_seedtalent_capture.autopilot.course_discovery import discover_fixture_courses_from_file
 from som_seedtalent_capture.autopilot.media_controller import FixtureMediaController
-from som_seedtalent_capture.autopilot.quiz_controller import FixtureQuizController, LiveQuizController, QuizCaptureResult, QuizEvidenceSnippet
+from som_seedtalent_capture.autopilot.quiz_controller import FixtureQuizController, LiveQuizController, QuizEvidenceSnippet
 from som_seedtalent_capture.autopilot.runner import run_fixture_autopilot
 from som_seedtalent_capture.autopilot.state_machine import PageKind, PageObservation
 from som_seedtalent_capture.permissions import load_permission_manifest
@@ -471,20 +471,6 @@ def test_live_quiz_controller_resets_feedback_state_before_retry(tmp_path: Path)
             return None
 
     controller = LiveQuizController(mode=QuizCaptureMode.CAPTURE_AND_COMPLETE_ON_CAPTURE_ACCOUNT)
-    controller.history.append(
-        QuizCaptureResult(
-            mode=QuizCaptureMode.CAPTURE_AND_COMPLETE_ON_CAPTURE_ACCOUNT,
-            page_kind=PageKind.QUIZ_QUESTION,
-            question_text="What is important to the Seed & Strain Growers? (select all that apply)",
-            options=["Clean and well-run cultivation centers", "The highest THC %"],
-            question_screenshot_uri=str(tmp_path / "previous-question.png"),
-            feedback_screenshot_uri=str(tmp_path / "previous-feedback.png"),
-            feedback_text="Incorrectly checked The highest THC %",
-            attempts_used=1,
-            attempt_number=1,
-        )
-    )
-
     result = controller.run(
         page=_FakePage(),
         surface=_FakeSurface(),
