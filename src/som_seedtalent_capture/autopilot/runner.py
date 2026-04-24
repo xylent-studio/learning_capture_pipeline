@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from som_seedtalent_capture.autopilot.capture_plan import CapturePlan
 from som_seedtalent_capture.autopilot.page_classifier import VisibleDomSnapshot, classify_fixture_page, classify_visible_page
+from som_seedtalent_capture.autopilot.quiz_controller import LiveQuizController, QuizCaptureResult, QuizEvidenceSnippet
 from som_seedtalent_capture.autopilot.recorder import RecorderProvider, RecorderSession, RecorderStartRequest
 from som_seedtalent_capture.autopilot.state_machine import CaptureDecision, NavigationAction, PageKind, PageObservation, decide_next_action
 from som_seedtalent_capture.pilot_manifests import FailureCategory
@@ -98,6 +99,7 @@ class AutopilotRunResult(BaseModel):
     observations: list[PageObservation] = Field(default_factory=list)
     decisions: list[RunnerDecisionRecord] = Field(default_factory=list)
     events: list[RunnerEvent] = Field(default_factory=list)
+    quiz_history: list[QuizCaptureResult] = Field(default_factory=list)
     visited_execution_urls: list[str] = Field(default_factory=list)
     visited_logical_urls: list[str] = Field(default_factory=list)
     completion_detected: bool = False
@@ -108,19 +110,6 @@ class AutopilotRunResult(BaseModel):
 
 
 class FixtureMediaController(Protocol):
-    def handle(
-        self,
-        *,
-        page: Page,
-        observation: PageObservation,
-        screenshot_dir: Path,
-        logical_url: str | None,
-        timestamp_ms: int,
-    ) -> list[RunnerEvent]:
-        ...
-
-
-class FixtureQuizController(Protocol):
     def handle(
         self,
         *,
@@ -339,6 +328,77 @@ def _state_signature(snapshot: RunnerPageSnapshot, observation: PageObservation)
     )
 
 
+def _build_quiz_evidence_snippets(result: AutopilotRunResult) -> list[QuizEvidenceSnippet]:
+    snippets: list[QuizEvidenceSnippet] = []
+    for snapshot, observation in zip(result.page_snapshots, result.observations, strict=False):
+        if observation.page_kind in {PageKind.QUIZ_INTRO, PageKind.QUIZ_QUESTION, PageKind.QUIZ_RESULTS, PageKind.QUIZ_FEEDBACK}:
+            continue
+        text = " ".join(filter(None, [snapshot.title, " ".join(snapshot.headings), snapshot.visible_text]))
+        text = text.strip()
+        if not text:
+            continue
+        source_reference = snapshot.screenshot_uri or snapshot.logical_url or snapshot.execution_url
+        snippets.append(QuizEvidenceSnippet(source_reference=source_reference, text=text))
+    return snippets
+
+
+def _record_quiz_events(
+    *,
+    result: AutopilotRunResult,
+    quiz_result: QuizCaptureResult,
+    timestamp_ms: int,
+    execution_url: str,
+    logical_url: str | None,
+    page_kind: PageKind,
+) -> None:
+    result.quiz_history.append(quiz_result)
+    result.events.append(
+        RunnerEvent(
+            event_type=RunnerEventType.QUIZ_CONTROLLER_HANDOFF,
+            timestamp_ms=timestamp_ms,
+            execution_url=execution_url,
+            logical_url=logical_url,
+            page_kind=page_kind,
+            detail=quiz_result.answer_strategy,
+            screenshot_uri=quiz_result.question_screenshot_uri,
+        )
+    )
+    result.events.append(
+        RunnerEvent(
+            event_type=RunnerEventType.SCREENSHOT_CAPTURED,
+            timestamp_ms=timestamp_ms,
+            execution_url=execution_url,
+            logical_url=logical_url,
+            page_kind=page_kind,
+            screenshot_uri=quiz_result.question_screenshot_uri,
+            detail="quiz_state_capture",
+        )
+    )
+    if quiz_result.feedback_screenshot_uri:
+        result.events.append(
+            RunnerEvent(
+                event_type=RunnerEventType.SCREENSHOT_CAPTURED,
+                timestamp_ms=timestamp_ms,
+                execution_url=execution_url,
+                logical_url=logical_url,
+                page_kind=page_kind,
+                screenshot_uri=quiz_result.feedback_screenshot_uri,
+                detail="quiz_feedback_capture",
+            )
+        )
+    if quiz_result.applied_action_label:
+        result.events.append(
+            RunnerEvent(
+                event_type=RunnerEventType.CLICK,
+                timestamp_ms=timestamp_ms,
+                execution_url=execution_url,
+                logical_url=logical_url,
+                page_kind=page_kind,
+                detail=quiz_result.applied_action_label,
+            )
+        )
+
+
 def _record_decision(result: AutopilotRunResult, observation: PageObservation, decision: CaptureDecision, logical_url: str | None) -> None:
     result.decisions.append(
         RunnerDecisionRecord(
@@ -498,7 +558,7 @@ def run_fixture_autopilot(
     start_url_override: str | None = None,
     max_steps: int = 20,
     media_controller: FixtureMediaController | None = None,
-    quiz_controller: FixtureQuizController | None = None,
+    quiz_controller: Any | None = None,
     recorder_provider: RecorderProvider | None = None,
 ) -> AutopilotRunResult:
     fixture_root_path = Path(fixture_root).resolve()
@@ -650,7 +710,7 @@ def run_fixture_autopilot(
                     page.wait_for_load_state("domcontentloaded")
                     continue
 
-                if observation.page_kind == PageKind.QUIZ_QUESTION:
+                if observation.page_kind in {PageKind.QUIZ_INTRO, PageKind.QUIZ_QUESTION, PageKind.QUIZ_RESULTS}:
                     if quiz_controller is None:
                         result.stopped_reason = "quiz_controller_required"
                         result.events.append(
@@ -665,27 +725,42 @@ def run_fixture_autopilot(
                         )
                         break
 
+                    quiz_result = quiz_controller.run(
+                        page=page,
+                        observation=observation,
+                        screenshot_dir=screenshot_dir,
+                        logical_url=logical_url,
+                        timestamp_ms=timestamp_ms,
+                    )
+                    _record_quiz_events(
+                        result=result,
+                        quiz_result=quiz_result,
+                        timestamp_ms=timestamp_ms,
+                        execution_url=page.url,
+                        logical_url=logical_url,
+                        page_kind=observation.page_kind,
+                    )
+                    if quiz_result.applied_action_label:
+                        page.wait_for_load_state("domcontentloaded")
+                        continue
+
+                    result.stopped_reason = quiz_result.stopped_reason or "quiz_not_advanced"
+                    result.failure_category = (
+                        FailureCategory.QUIZ_RESULTS_EXIT_UNHANDLED
+                        if observation.page_kind == PageKind.QUIZ_RESULTS
+                        else FailureCategory.NO_LIVE_NAVIGATION_AVAILABLE
+                    )
                     result.events.append(
                         RunnerEvent(
-                            event_type=RunnerEventType.QUIZ_CONTROLLER_HANDOFF,
+                            event_type=RunnerEventType.RUN_STOPPED,
                             timestamp_ms=timestamp_ms,
                             execution_url=page.url,
                             logical_url=logical_url,
                             page_kind=observation.page_kind,
-                            detail="delegate_quiz_page",
+                            detail=result.stopped_reason,
                         )
                     )
-                    result.events.extend(
-                        quiz_controller.handle(
-                            page=page,
-                            observation=observation,
-                            screenshot_dir=screenshot_dir,
-                            logical_url=logical_url,
-                            timestamp_ms=timestamp_ms,
-                        )
-                    )
-                    page.wait_for_load_state("domcontentloaded")
-                    continue
+                    break
 
                 clicked_label = _apply_direct_navigation(page=page, observation=observation, plan=plan, result=result)
                 if clicked_label:
@@ -776,6 +851,7 @@ def run_visible_session_autopilot(
     start = perf_counter()
     repeated_signature: str | None = None
     repeated_count = 0
+    quiz_controller = LiveQuizController(mode=plan.quiz_mode)
     result.events.append(
         RunnerEvent(
             event_type=RunnerEventType.RUN_STARTED,
@@ -952,6 +1028,47 @@ def run_visible_session_autopilot(
                             page_kind=observation.page_kind,
                             detail="completion_detected",
                             screenshot_uri=snapshot.screenshot_uri,
+                        )
+                    )
+                    break
+
+                if observation.page_kind in {PageKind.QUIZ_INTRO, PageKind.QUIZ_QUESTION, PageKind.QUIZ_RESULTS}:
+                    quiz_result = quiz_controller.run(
+                        page=page,
+                        surface=capture_surface,
+                        observation=observation,
+                        screenshot_dir=screenshot_dir,
+                        logical_url=logical_url,
+                        timestamp_ms=timestamp_ms,
+                        evidence_snippets=_build_quiz_evidence_snippets(result),
+                    )
+                    _record_quiz_events(
+                        result=result,
+                        quiz_result=quiz_result,
+                        timestamp_ms=timestamp_ms,
+                        execution_url=page.url,
+                        logical_url=logical_url,
+                        page_kind=observation.page_kind,
+                    )
+                    if quiz_result.applied_action_label:
+                        page.wait_for_load_state("domcontentloaded")
+                        continue
+
+                    result.failure_category = (
+                        FailureCategory.QUIZ_RESULTS_EXIT_UNHANDLED
+                        if observation.page_kind == PageKind.QUIZ_RESULTS
+                        else FailureCategory.NO_LIVE_NAVIGATION_AVAILABLE
+                    )
+                    result.stopped_reason = quiz_result.stopped_reason or "quiz_state_not_advanced"
+                    result.events.append(
+                        RunnerEvent(
+                            event_type=RunnerEventType.RUN_STOPPED,
+                            timestamp_ms=timestamp_ms,
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            detail=result.stopped_reason,
+                            screenshot_uri=quiz_result.feedback_screenshot_uri or quiz_result.question_screenshot_uri,
                         )
                     )
                     break

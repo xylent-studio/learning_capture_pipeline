@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from som_seedtalent_capture.autopilot.capture_plan import CapturePlan
+from som_seedtalent_capture.autopilot.quiz_controller import QuizCaptureResult
 from som_seedtalent_capture.artifacts import ArtifactRecord, RunArtifactLayout
 from som_seedtalent_capture.models import new_id
 
@@ -145,6 +146,7 @@ class PilotRunManifest(BaseModel):
     screenshot_uris: list[str] = Field(default_factory=list)
     observed_page_kinds: list[str] = Field(default_factory=list)
     visited_logical_urls: list[str] = Field(default_factory=list)
+    quiz_history: list[QuizCaptureResult] = Field(default_factory=list)
     completion_detected: bool = False
     unknown_ui_state_detected: bool = False
     runner_stop_reason: str | None = None

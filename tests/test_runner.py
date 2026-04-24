@@ -5,6 +5,7 @@ from playwright.sync_api import Error, Page, sync_playwright
 
 from som_seedtalent_capture.autopilot.capture_plan import build_fixture_capture_plan_from_file
 from som_seedtalent_capture.autopilot.course_discovery import discover_fixture_courses_from_file
+from som_seedtalent_capture.autopilot.quiz_controller import QuizCaptureMode, QuizCaptureResult
 from som_seedtalent_capture.autopilot.runner import (
     _apply_live_navigation,
     RunnerEvent,
@@ -80,7 +81,7 @@ class StubMediaController:
 class StubQuizController:
     handled = False
 
-    def handle(
+    def run(
         self,
         *,
         page: Page,
@@ -88,23 +89,35 @@ class StubQuizController:
         screenshot_dir: Path,
         logical_url: str | None,
         timestamp_ms: int,
-    ) -> list[RunnerEvent]:
+    ) -> QuizCaptureResult:
+        del logical_url
         self.handled = True
         page.locator("input[name='q1']").first.check()
         page.get_by_role("button", name="Submit").click()
         page.wait_for_load_state("domcontentloaded")
         page.get_by_role("button", name="Continue").click()
         page.wait_for_load_state("domcontentloaded")
-        return [
-            RunnerEvent(
-                event_type=RunnerEventType.CLICK,
-                timestamp_ms=timestamp_ms,
-                execution_url=page.url,
-                logical_url=logical_url,
-                page_kind=observation.page_kind,
-                detail="Submit quiz and continue",
-            )
-        ]
+        question_screenshot = screenshot_dir / f"quiz-question-{timestamp_ms}.png"
+        feedback_screenshot = screenshot_dir / f"quiz-feedback-{timestamp_ms}.png"
+        question_screenshot.write_text("image", encoding="utf-8")
+        feedback_screenshot.write_text("image", encoding="utf-8")
+        return QuizCaptureResult(
+            mode=QuizCaptureMode.CAPTURE_AND_COMPLETE_ON_CAPTURE_ACCOUNT,
+            page_kind=observation.page_kind,
+            question_text="Stub question",
+            options=["Option A"],
+            selected_answers=["Option A"],
+            feedback_text="Correct",
+            progression_controls=["Continue"],
+            question_screenshot_uri=str(question_screenshot),
+            feedback_screenshot_uri=str(feedback_screenshot),
+            attempts_used=1,
+            attempt_number=1,
+            confidence=1.0,
+            answer_strategy="stubbed",
+            advanced_to_next=True,
+            applied_action_label="Continue",
+        )
 
 
 def test_runner_captures_catalog_and_overview_artifacts(tmp_path: Path):
@@ -407,7 +420,22 @@ def test_run_visible_session_autopilot_detects_repeated_same_state(monkeypatch, 
     monkeypatch.setattr("som_seedtalent_capture.autopilot.runner.sync_playwright", lambda: _FakePlaywright())
     monkeypatch.setattr("som_seedtalent_capture.autopilot.runner._wait_for_live_page_ready", lambda page: page)
     monkeypatch.setattr("som_seedtalent_capture.autopilot.runner._capture_page", _fake_capture_page)
-    monkeypatch.setattr("som_seedtalent_capture.autopilot.runner._apply_live_navigation", lambda **kwargs: "NEXT")
+    monkeypatch.setattr(
+        "som_seedtalent_capture.autopilot.runner.LiveQuizController.run",
+        lambda self, **kwargs: QuizCaptureResult(
+            mode=QuizCaptureMode.CAPTURE_AND_COMPLETE_ON_CAPTURE_ACCOUNT,
+            page_kind=PageKind.QUIZ_RESULTS,
+            question_text="Quiz Results",
+            options=[],
+            progression_controls=["NEXT", "TAKE AGAIN"],
+            question_screenshot_uri=str(tmp_path / "quiz-state.png"),
+            attempts_used=1,
+            attempt_number=1,
+            confidence=0.0,
+            answer_strategy="results_exit",
+            applied_action_label="NEXT",
+        ),
+    )
 
     result = run_visible_session_autopilot(
         plan=plan,
