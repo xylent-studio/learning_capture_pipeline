@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Audio Coaching Reminder</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body data-page-kind="lesson_audio">
+    <header>
+      <p>Audio Lesson</p>
+      <h1>Audio Coaching Reminder</h1>
+      <nav>
+        <a href="lesson-list.html">Lesson List</a>
+        <a href="quiz.html">Next Lesson</a>
+      </nav>
+    </header>
+    <main>
+      <section class="panel">
+        <p class="progress">Duration: 90 seconds</p>
+        <p>This dummy audio reminder reinforces greeting customers and reporting floor hazards.</p>
+        <div class="player" role="group" aria-label="Audio player">
+          <audio controls preload="metadata" data-fixture-kind="audio" aria-label="Audio coaching reminder"></audio>
+          <div>
+            <button type="button">Play Lesson Audio</button>
+            <button type="button" onclick="window.location.href='quiz.html'">Next</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
