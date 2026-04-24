@@ -5,6 +5,7 @@ from playwright.sync_api import Error, Page, sync_playwright
 
 from som_seedtalent_capture.autopilot.capture_plan import build_fixture_capture_plan_from_file
 from som_seedtalent_capture.autopilot.course_discovery import discover_fixture_courses_from_file
+from som_seedtalent_capture.autopilot.quiz_controller import QuizCaptureMode, QuizCaptureResult
 from som_seedtalent_capture.autopilot.runner import (
     _apply_live_navigation,
     RunnerEvent,
@@ -80,7 +81,7 @@ class StubMediaController:
 class StubQuizController:
     handled = False
 
-    def handle(
+    def run(
         self,
         *,
         page: Page,
@@ -88,23 +89,35 @@ class StubQuizController:
         screenshot_dir: Path,
         logical_url: str | None,
         timestamp_ms: int,
-    ) -> list[RunnerEvent]:
+    ) -> QuizCaptureResult:
+        del logical_url
         self.handled = True
         page.locator("input[name='q1']").first.check()
         page.get_by_role("button", name="Submit").click()
         page.wait_for_load_state("domcontentloaded")
         page.get_by_role("button", name="Continue").click()
         page.wait_for_load_state("domcontentloaded")
-        return [
-            RunnerEvent(
-                event_type=RunnerEventType.CLICK,
-                timestamp_ms=timestamp_ms,
-                execution_url=page.url,
-                logical_url=logical_url,
-                page_kind=observation.page_kind,
-                detail="Submit quiz and continue",
-            )
-        ]
+        question_screenshot = screenshot_dir / f"quiz-question-{timestamp_ms}.png"
+        feedback_screenshot = screenshot_dir / f"quiz-feedback-{timestamp_ms}.png"
+        question_screenshot.write_text("image", encoding="utf-8")
+        feedback_screenshot.write_text("image", encoding="utf-8")
+        return QuizCaptureResult(
+            mode=QuizCaptureMode.CAPTURE_AND_COMPLETE_ON_CAPTURE_ACCOUNT,
+            page_kind=observation.page_kind,
+            question_text="Stub question",
+            options=["Option A"],
+            selected_answers=["Option A"],
+            feedback_text="Correct",
+            progression_controls=["Continue"],
+            question_screenshot_uri=str(question_screenshot),
+            feedback_screenshot_uri=str(feedback_screenshot),
+            attempts_used=1,
+            attempt_number=1,
+            confidence=1.0,
+            answer_strategy="stubbed",
+            advanced_to_next=True,
+            applied_action_label="Continue",
+        )
 
 
 def test_runner_captures_catalog_and_overview_artifacts(tmp_path: Path):
@@ -407,7 +420,22 @@ def test_run_visible_session_autopilot_detects_repeated_same_state(monkeypatch, 
     monkeypatch.setattr("som_seedtalent_capture.autopilot.runner.sync_playwright", lambda: _FakePlaywright())
     monkeypatch.setattr("som_seedtalent_capture.autopilot.runner._wait_for_live_page_ready", lambda page: page)
     monkeypatch.setattr("som_seedtalent_capture.autopilot.runner._capture_page", _fake_capture_page)
-    monkeypatch.setattr("som_seedtalent_capture.autopilot.runner._apply_live_navigation", lambda **kwargs: "NEXT")
+    monkeypatch.setattr(
+        "som_seedtalent_capture.autopilot.runner.LiveQuizController.run",
+        lambda self, **kwargs: QuizCaptureResult(
+            mode=QuizCaptureMode.CAPTURE_AND_COMPLETE_ON_CAPTURE_ACCOUNT,
+            page_kind=PageKind.QUIZ_RESULTS,
+            question_text="Quiz Results",
+            options=[],
+            progression_controls=["NEXT", "TAKE AGAIN"],
+            question_screenshot_uri=str(tmp_path / "quiz-state.png"),
+            attempts_used=1,
+            attempt_number=1,
+            confidence=0.0,
+            answer_strategy="results_exit",
+            applied_action_label="NEXT",
+        ),
+    )
 
     result = run_visible_session_autopilot(
         plan=plan,
@@ -420,3 +448,128 @@ def test_run_visible_session_autopilot_detects_repeated_same_state(monkeypatch, 
     assert result.failure_category == FailureCategory.REPEATED_SAME_STATE
     assert result.stopped_reason == "repeated_same_state"
     assert result.active_capture_surface == "frame:scormdriver_content"
+
+
+def test_run_visible_session_autopilot_waits_through_loading_before_stopping(monkeypatch, tmp_path: Path) -> None:
+    class _WaitingPage(_FakeLivePage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.wait_calls: list[int] = []
+
+        def wait_for_timeout(self, timeout_ms: int) -> None:
+            self.wait_calls.append(timeout_ms)
+
+    waiting_page = _WaitingPage()
+
+    class _FakeContext:
+        def new_page(self):
+            return waiting_page
+
+    class _FakeBrowser:
+        def new_context(self, storage_state: str):
+            del storage_state
+            return _FakeContext()
+
+        def close(self) -> None:
+            return None
+
+    class _FakeChromium:
+        def launch(self, headless: bool = True):
+            del headless
+            return _FakeBrowser()
+
+    class _FakePlaywright:
+        chromium = _FakeChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    plan = _build_capture_plan().model_copy(update={"lesson_urls": []}, deep=True)
+    storage_state_path = tmp_path / "storage-state.json"
+    storage_state_path.write_text('{"cookies":[]}', encoding="utf-8")
+
+    snapshots = [
+        (
+            PageKind.COURSE_SHELL_LOADING,
+            "Dashboard Course Library Reports Logout",
+            "https://app.seedtalent.com/course/launch",
+            "page",
+            None,
+        ),
+        (
+            PageKind.COURSE_SHELL_LOADING,
+            "Dashboard Course Library Reports Logout",
+            "https://app.seedtalent.com/course/launch",
+            "page",
+            None,
+        ),
+        (
+            PageKind.COMPLETION_PAGE,
+            "Completed Return to Catalog",
+            "https://cdn.example/scormcontent/index.html#/complete",
+            "frame",
+            "scormdriver_content",
+        ),
+    ]
+    snapshot_counter = {"count": 0}
+
+    def _fake_capture_page(**kwargs):  # noqa: ANN003
+        del kwargs
+        from som_seedtalent_capture.autopilot.runner import RunnerPageSnapshot
+        from som_seedtalent_capture.autopilot.state_machine import PageObservation
+
+        page_kind, visible_text, execution_url, surface_type, surface_name = snapshots[snapshot_counter["count"]]
+        screenshot_uri = str(tmp_path / f"step-{snapshot_counter['count']:03d}.png")
+        Path(screenshot_uri).write_text("image", encoding="utf-8")
+        snapshot_counter["count"] += 1
+        snapshot = RunnerPageSnapshot(
+            execution_url=execution_url,
+            logical_url="https://app.seedtalent.com/courses/pilot-course",
+            outer_page_url="https://app.seedtalent.com/courses/pilot-course",
+            outer_page_title="Seed Talent",
+            active_capture_surface_type=surface_type,
+            active_capture_surface_name=surface_name,
+            active_capture_surface_url=execution_url,
+            title="Seed Talent",
+            visible_text=visible_text,
+            headings=[],
+            buttons=["Return to Catalog"] if page_kind == PageKind.COMPLETION_PAGE else [],
+            links=[],
+            screenshot_uri=screenshot_uri,
+            page_kind=page_kind,
+            confidence=0.95,
+        )
+        observation = PageObservation(
+            url=snapshot.execution_url,
+            title=snapshot.title,
+            page_kind=page_kind,
+            visible_text_sample=snapshot.visible_text,
+            buttons=snapshot.buttons,
+            links=[],
+            screenshot_uri=snapshot.screenshot_uri,
+            confidence=0.95,
+        )
+        return snapshot, observation
+
+    monkeypatch.setattr("som_seedtalent_capture.autopilot.runner.sync_playwright", lambda: _FakePlaywright())
+    monkeypatch.setattr("som_seedtalent_capture.autopilot.runner._wait_for_live_page_ready", lambda page: page)
+    monkeypatch.setattr("som_seedtalent_capture.autopilot.runner._capture_page", _fake_capture_page)
+
+    result = run_visible_session_autopilot(
+        plan=plan,
+        artifact_root=tmp_path,
+        storage_state_path=storage_state_path,
+        headless=True,
+        max_steps=3,
+    )
+
+    assert result.completion_detected is True
+    assert waiting_page.wait_calls == [1500, 1500]
+    assert [snapshot.page_kind for snapshot in result.page_snapshots] == [
+        PageKind.COURSE_SHELL_LOADING,
+        PageKind.COURSE_SHELL_LOADING,
+        PageKind.COMPLETION_PAGE,
+    ]

@@ -6,6 +6,7 @@ from playwright.sync_api import Error, Page, sync_playwright
 from som_seedtalent_capture.autopilot.capture_plan import build_fixture_capture_plan_from_file
 from som_seedtalent_capture.autopilot.course_discovery import discover_fixture_courses_from_file
 from som_seedtalent_capture.autopilot.media_controller import FixtureMediaController, inspect_media_playback_state
+from som_seedtalent_capture.autopilot.quiz_controller import QuizCaptureMode, QuizCaptureResult
 from som_seedtalent_capture.autopilot.runner import RunnerEvent, RunnerEventType, run_fixture_autopilot
 from som_seedtalent_capture.autopilot.state_machine import PageKind
 from som_seedtalent_capture.permissions import load_permission_manifest
@@ -39,7 +40,7 @@ def _build_capture_plan():
 
 
 class StubQuizController:
-    def handle(
+    def run(
         self,
         *,
         page: Page,
@@ -47,22 +48,28 @@ class StubQuizController:
         screenshot_dir: Path,
         logical_url: str | None,
         timestamp_ms: int,
-    ) -> list[RunnerEvent]:
+    ) -> QuizCaptureResult:
         page.locator("input[name='q1']").first.check()
         page.get_by_role("button", name="Submit").click()
         page.wait_for_load_state("domcontentloaded")
         page.get_by_role("button", name="Continue").click()
         page.wait_for_load_state("domcontentloaded")
-        return [
-            RunnerEvent(
-                event_type=RunnerEventType.CLICK,
-                timestamp_ms=timestamp_ms,
-                execution_url=page.url,
-                logical_url=logical_url,
-                page_kind=observation.page_kind,
-                detail="Submit quiz and continue",
-            )
-        ]
+        return QuizCaptureResult(
+            mode=QuizCaptureMode.CAPTURE_AND_COMPLETE_ON_CAPTURE_ACCOUNT,
+            page_kind=observation.page_kind,
+            question_text="Fixture media controller quiz",
+            option_texts=["Choice A"],
+            selected_answers=["Choice A"],
+            progression_controls=["Submit", "Continue"],
+            question_screenshot_uri=str((screenshot_dir / "fixture-question.png").resolve()),
+            feedback_screenshot_uri=str((screenshot_dir / "fixture-feedback.png").resolve()),
+            attempts_used=1,
+            attempt_number=1,
+            confidence=0.0,
+            answer_strategy="fixture_stub",
+            applied_action_label="Continue",
+            advanced_to_next=True,
+        )
 
 
 @pytest.mark.parametrize(

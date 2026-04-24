@@ -497,6 +497,7 @@ def _update_run_manifest_from_execution(
             "screenshot_uris": unique_screenshots,
             "observed_page_kinds": [observation.page_kind.value for observation in run_result.observations],
             "visited_logical_urls": run_result.visited_logical_urls,
+            "quiz_history": run_result.quiz_history,
             "completion_detected": run_result.completion_detected,
             "unknown_ui_state_detected": run_result.unknown_ui_state_detected,
             "runner_stop_reason": run_result.stopped_reason,
