@@ -24,6 +24,12 @@ from som_seedtalent_capture.autopilot.page_classifier import (
     VisibleDomSnapshot,
     classify_fixture_page,
 )
+from som_seedtalent_capture.autopilot.qa import (
+    AutopilotQAResult,
+    AutopilotReadinessStatus,
+    RecaptureReason,
+    evaluate_autopilot_run,
+)
 from som_seedtalent_capture.autopilot.quiz_controller import (
     FixtureQuizController,
     QuizCaptureResult,
@@ -55,6 +61,8 @@ from som_seedtalent_capture.autopilot.state_machine import (
 __all__ = [
     "AutopilotState",
     "AutopilotRunResult",
+    "AutopilotQAResult",
+    "AutopilotReadinessStatus",
     "CapturePlan",
     "CourseDiscoveryResult",
     "CourseInventoryItem",
@@ -69,6 +77,7 @@ __all__ = [
     "QaThresholds",
     "QuizCaptureMode",
     "QuizCaptureResult",
+    "RecaptureReason",
     "RecorderSession",
     "RecorderSessionStatus",
     "RecorderStartRequest",
@@ -87,6 +96,7 @@ __all__ = [
     "decide_next_action",
     "discover_fixture_courses",
     "discover_fixture_courses_from_file",
+    "evaluate_autopilot_run",
     "FixtureQuizController",
     "inspect_media_playback_state",
     "run_fixture_autopilot",
