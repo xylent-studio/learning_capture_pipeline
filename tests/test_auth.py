@@ -1,10 +1,14 @@
 from pathlib import Path
 
+import pytest
+
+from som_seedtalent_capture import auth as auth_module
 from som_seedtalent_capture.auth import (
     AuthMode,
     AuthPreflightStatus,
     BrowserPreflightObservation,
     FakeBrowserAuthPreflight,
+    PlaywrightVisibleAuthPreflight,
     run_auth_preflight,
     validate_manual_storage_state_path,
 )
@@ -196,3 +200,101 @@ def test_run_auth_preflight_fails_for_unsupported_mode(tmp_path: Path):
 
     assert result.status == AuthPreflightStatus.FAILED
     assert result.error_reason == "unsupported_auth_mode"
+
+
+def test_playwright_visible_auth_preflight_waits_for_visible_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    storage_state_path = tmp_path / "outside-secrets" / "storage_state.json"
+    storage_state_path.parent.mkdir(parents=True)
+    storage_state_path.write_text('{"cookies": []}', encoding="utf-8")
+    screenshot_dir = tmp_path / "screenshots"
+    observed_timeouts: list[int] = []
+
+    class _FakeLocator:
+        def __init__(self, page) -> None:
+            self._page = page
+
+        def inner_text(self) -> str:
+            return self._page.body_text
+
+    class _FakePage:
+        def __init__(self) -> None:
+            self.url = "https://app.seedtalent.com/"
+            self._body_text = ""
+
+        @property
+        def body_text(self) -> str:
+            return self._body_text
+
+        def goto(self, url: str, wait_until: str | None = None) -> None:
+            del wait_until
+            self.url = url
+
+        def locator(self, selector: str):
+            assert selector == "body"
+            return _FakeLocator(self)
+
+        def wait_for_timeout(self, timeout_ms: int) -> None:
+            observed_timeouts.append(timeout_ms)
+            self._body_text = "Dashboard Course Library Reports Logout"
+
+        def screenshot(self, path: str, full_page: bool = True) -> None:
+            del full_page
+            Path(path).write_text("fake screenshot", encoding="utf-8")
+
+    class _FakeContext:
+        def __init__(self, page: _FakePage) -> None:
+            self._page = page
+
+        def new_page(self) -> _FakePage:
+            return self._page
+
+    class _FakeBrowser:
+        def __init__(self, page: _FakePage) -> None:
+            self._page = page
+
+        def new_context(self, storage_state: str):
+            assert storage_state.endswith("storage_state.json") or storage_state.endswith("storage-state.json")
+            return _FakeContext(self._page)
+
+        def close(self) -> None:
+            return None
+
+    class _FakeChromium:
+        def __init__(self, page: _FakePage) -> None:
+            self._page = page
+
+        def launch(self, headless: bool = True):
+            assert headless is True
+            return _FakeBrowser(self._page)
+
+    class _FakePlaywrightContext:
+        def __init__(self, page: _FakePage) -> None:
+            self.chromium = _FakeChromium(page)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    fake_page = _FakePage()
+    monkeypatch.setattr(auth_module, "sync_playwright", lambda: _FakePlaywrightContext(fake_page))
+
+    preflight = PlaywrightVisibleAuthPreflight(
+        screenshot_dir=screenshot_dir,
+        authenticated_indicators=["Dashboard", "Course Library", "Reports"],
+        auth_expired_indicators=["Sign in", "Log in", "Login", "Session expired"],
+        prohibited_path_patterns=["/settings"],
+        headless=True,
+    )
+
+    observation = preflight.run(
+        storage_state_path=storage_state_path,
+        base_url="https://app.seedtalent.com/",
+        account_alias="seedtalent-capture-bot",
+    )
+
+    assert observation.authenticated is True
+    assert "Dashboard" in (observation.visible_state_summary or "")
+    assert observation.screenshot_uri is not None
+    assert observed_timeouts != []
