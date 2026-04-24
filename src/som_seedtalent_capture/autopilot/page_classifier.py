@@ -195,6 +195,11 @@ def classify_visible_page(
             " ".join(snapshot.links),
         ]
     ).lower()
+    visible_buttons = {button.strip().lower() for button in snapshot.buttons if button.strip()}
+    has_results_signal = any(token in haystack for token in {"quiz results", "your score", "you scored", "score:"})
+    has_question_signal = any(token in haystack for token in {"question", "select all that apply", "knowledge check", "assessment"})
+    has_submit_button = "submit" in visible_buttons or "submit" in haystack
+    has_results_progression = any(control in visible_buttons for control in {"continue", "finish", "complete", "return to catalog"})
 
     if any(token in haystack for token in {"sign in", "log in", "login", "session expired"}):
         page_kind, confidence = PageKind.AUTH_REQUIRED, 0.96
@@ -206,9 +211,9 @@ def classify_visible_page(
         page_kind, confidence = PageKind.SCORM_FRAME_LOADING, 0.84
     elif any(token in haystack for token in {"read and select each box to move on", "complete the content above before moving on"}):
         page_kind, confidence = PageKind.LESSON_INTERACTION_GATE, 0.91
-    elif any(token in haystack for token in {"quiz results", "your score", "you scored", "score:"}) and any(
-        token in haystack for token in {"next", "take again", "continue"}
-    ):
+    elif has_question_signal and has_submit_button and has_results_signal and not has_results_progression:
+        page_kind, confidence = PageKind.QUIZ_QUESTION, 0.95
+    elif has_results_signal and any(token in haystack for token in {"next", "take again", "continue"}):
         page_kind, confidence = PageKind.QUIZ_RESULTS, 0.94
     elif any(token in haystack for token in {"start quiz", "begin quiz"}) and not any(
         token in haystack for token in {"question", "submit", "quiz results"}

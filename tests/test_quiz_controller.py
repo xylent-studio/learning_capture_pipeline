@@ -144,6 +144,99 @@ def test_live_quiz_controller_uses_evidence_grounded_answering(tmp_path: Path):
     assert result.confidence >= 0.75
 
 
+def test_live_quiz_controller_falls_back_to_select_all_for_multi_select(tmp_path: Path):
+    class _FakeLocator:
+        def __init__(self, *, body_text: str = "", values: list[str] | None = None) -> None:
+            self._body_text = body_text
+            self._values = values or []
+
+        def inner_text(self) -> str:
+            return self._body_text
+
+        def all_inner_texts(self) -> list[str]:
+            return self._values
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            return 0
+
+        def filter(self, has_text):  # noqa: ANN001
+            return self
+
+    class _FakeSurface:
+        def locator(self, selector: str):
+            if selector == "body":
+                return _FakeLocator(
+                    body_text=(
+                        "Question 01/02\n"
+                        "Seed & Strain consumers... (select all that apply)\n"
+                        "Are passionate about quality\n"
+                        "Are regular cannabis users\n"
+                        "Seek unique flower characteristics\n"
+                        "Submit"
+                    )
+                )
+            if selector == "h1:visible, h2:visible, h3:visible":
+                return _FakeLocator(values=["Question 01/02"])
+            if selector == "label:visible":
+                return _FakeLocator(
+                    values=[
+                        "Are passionate about quality",
+                        "Are regular cannabis users",
+                        "Seek unique flower characteristics",
+                    ]
+                )
+            if selector == "button:visible":
+                return _FakeLocator(values=["Submit"])
+            if selector == "button, a, [role='button']":
+                return _FakeLocator(values=[])
+            raise AssertionError(selector)
+
+        def get_by_label(self, pattern):  # noqa: ANN001
+            class _LabelLocator:
+                @property
+                def first(self):
+                    return self
+
+                def count(self):
+                    return 0
+
+                def click(self, force: bool = False):  # noqa: ARG002
+                    return None
+
+            return _LabelLocator()
+
+    class _FakePage:
+        url = "https://app.seedtalent.com/course/example"
+
+        def screenshot(self, path: str, full_page: bool = True):  # noqa: ARG002
+            Path(path).write_text("image", encoding="utf-8")
+
+        def wait_for_timeout(self, timeout_ms: int):  # noqa: ARG002
+            return None
+
+    controller = LiveQuizController(mode=QuizCaptureMode.CAPTURE_AND_COMPLETE_ON_CAPTURE_ACCOUNT)
+    result = controller.run(
+        page=_FakePage(),
+        surface=_FakeSurface(),
+        observation=PageObservation(url="https://app.seedtalent.com/course/example", page_kind=PageKind.QUIZ_QUESTION),
+        screenshot_dir=tmp_path,
+        logical_url="https://app.seedtalent.com/course/example",
+        timestamp_ms=701,
+        evidence_snippets=[],
+    )
+
+    assert result.selected_answers == [
+        "Are passionate about quality",
+        "Are regular cannabis users",
+        "Seek unique flower characteristics",
+    ]
+    assert result.answer_strategy == "fallback_select_all"
+
+
 def test_live_quiz_controller_results_state_prefers_next_over_take_again(monkeypatch, tmp_path: Path):
     del monkeypatch
 

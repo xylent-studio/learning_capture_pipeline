@@ -192,6 +192,25 @@ def test_classify_live_quiz_results():
     assert observation.page_kind == PageKind.QUIZ_RESULTS
 
 
+def test_classify_live_mixed_quiz_state_as_question_when_submit_is_visible():
+    snapshot = VisibleDomSnapshot(
+        title="Seed Talent",
+        visible_text=(
+            "Question 01/02 What is important to the Seed & Strain Growers? (select all that apply) "
+            "Submit Next Quiz Results Your score 0% Failed Take Again"
+        ),
+        buttons=["SUBMIT", "NEXT", "TAKE AGAIN"],
+        headings=["Quiz", "Question 01/02", "Quiz Results"],
+    )
+
+    observation = classify_visible_page(
+        url="https://cdn.example/scormcontent/index.html#/quiz/example",
+        snapshot=snapshot,
+    )
+
+    assert observation.page_kind == PageKind.QUIZ_QUESTION
+
+
 def test_classify_shell_loading_vs_scorm_loading():
     shell_snapshot = VisibleDomSnapshot(
         title="Seed Talent",

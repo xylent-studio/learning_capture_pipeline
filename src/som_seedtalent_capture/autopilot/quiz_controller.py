@@ -425,7 +425,11 @@ class LiveQuizController:
                     answer_strategy = "feedback_informed_retry"
                     confidence = max(confidence, 0.8)
             if not selected_answers and options:
-                selected_answers = [options[0]]
+                if "select all that apply" in (question_text or "").lower():
+                    selected_answers = list(options)
+                    answer_strategy = "fallback_select_all"
+                else:
+                    selected_answers = [options[0]]
 
         applied_any = False
         for answer in selected_answers:
