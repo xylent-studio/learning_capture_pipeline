@@ -486,6 +486,137 @@ def test_live_quiz_controller_resets_feedback_state_before_retry(tmp_path: Path)
     assert result.feedback_changed_retry is True
 
 
+def test_live_quiz_controller_prefers_next_over_retry_on_feedback_marked_question(tmp_path: Path):
+    class _ButtonLocator:
+        def __init__(self, values: list[dict[str, str | bool]]) -> None:
+            self._values = values
+
+        def filter(self, has_text):  # noqa: ANN001
+            return _ButtonLocator([value for value in self._values if has_text.search(str(value["text"]))])
+
+        def count(self) -> int:
+            return len(self._values)
+
+        def nth(self, index: int):
+            return _SingleButtonLocator(self._values[index])
+
+    class _SingleButtonLocator:
+        def __init__(self, value: dict[str, str | bool]) -> None:
+            self._value = value
+
+        def inner_text(self):
+            return str(self._value["text"])
+
+        def is_visible(self):
+            return bool(self._value["visible"])
+
+        def is_enabled(self):
+            return bool(self._value["enabled"])
+
+        def get_attribute(self, name: str):
+            if name == "aria-hidden":
+                return "false"
+            if name == "aria-disabled":
+                return "false"
+            if name == "class":
+                return ""
+            return None
+
+        def scroll_into_view_if_needed(self, timeout: int = 0):  # noqa: ARG002
+            return None
+
+        def click(self, timeout: int = 0):  # noqa: ARG002
+            self._value["clicked"] = True
+            return None
+
+    class _StaticLocator:
+        def __init__(self, *, body_text: str = "", values: list[str] | None = None) -> None:
+            self._body_text = body_text
+            self._values = values or []
+
+        def inner_text(self) -> str:
+            return self._body_text
+
+        def all_inner_texts(self) -> list[str]:
+            return self._values
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            return 0
+
+        def filter(self, has_text):  # noqa: ANN001
+            del has_text
+            return self
+
+    buttons = [
+        {"text": "NEXT", "visible": True, "enabled": True},
+        {"text": "TAKE AGAIN", "visible": True, "enabled": True},
+        {"text": "SUBMIT", "visible": True, "enabled": True},
+    ]
+
+    class _FakeSurface:
+        def locator(self, selector: str):
+            if selector == "body":
+                return _StaticLocator(
+                    body_text=(
+                        "Incorrect. Correct answer: Clean and well-run cultivation centers. "
+                        "Your answer: The highest THC %. NEXT TAKE AGAIN SUBMIT"
+                    )
+                )
+            if selector == "h1:visible, h2:visible, h3:visible":
+                return _StaticLocator(values=["Question 01/02"])
+            if selector == "label:visible":
+                return _StaticLocator(values=["Clean and well-run cultivation centers", "The highest THC %"])
+            if selector == "button:visible":
+                return _StaticLocator(values=[str(button["text"]) for button in buttons])
+            if selector == "button, a, [role='button']":
+                return _ButtonLocator(buttons)
+            raise AssertionError(selector)
+
+        def get_by_label(self, pattern):  # noqa: ANN001
+            del pattern
+
+            class _NoopLabel:
+                @property
+                def first(self):
+                    return self
+
+                def count(self):
+                    return 0
+
+                def click(self, force: bool = False):  # noqa: ARG002
+                    return None
+
+            return _NoopLabel()
+
+    class _FakePage:
+        url = "https://app.seedtalent.com/course/example"
+
+        def screenshot(self, path: str, full_page: bool = True):  # noqa: ARG002
+            Path(path).write_text("image", encoding="utf-8")
+
+        def wait_for_timeout(self, timeout_ms: int):  # noqa: ARG002
+            return None
+
+    controller = LiveQuizController(mode=QuizCaptureMode.CAPTURE_AND_COMPLETE_ON_CAPTURE_ACCOUNT)
+    result = controller.run(
+        page=_FakePage(),
+        surface=_FakeSurface(),
+        observation=PageObservation(url="https://app.seedtalent.com/course/example", page_kind=PageKind.QUIZ_QUESTION),
+        screenshot_dir=tmp_path,
+        logical_url="https://app.seedtalent.com/course/example",
+        timestamp_ms=881,
+        evidence_snippets=[],
+    )
+
+    assert result.answer_strategy == "feedback_progression"
+    assert result.applied_action_label == "NEXT"
+    assert result.advanced_to_next is True
+
+
 def test_runner_reaches_completion_with_real_quiz_controller(tmp_path: Path):
     _ensure_chromium_or_skip()
 

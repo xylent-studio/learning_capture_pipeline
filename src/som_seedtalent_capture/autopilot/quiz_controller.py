@@ -430,6 +430,31 @@ class LiveQuizController:
             and self.history[-1].answer_strategy == "feedback_retry_reset"
             and self.history[-1].question_text == question_text
         )
+        if _has_retry_feedback_markers(body_text):
+            clicked_progression = _click_progression_control(surface, page, [rf"^{label}$" for label in _ALLOWED_RESULTS_CONTROLS])
+            if clicked_progression is not None:
+                result = QuizCaptureResult(
+                    mode=self.mode,
+                    page_kind=observation.page_kind,
+                    question_text=question_text,
+                    options=options,
+                    feedback_text=body_text,
+                    score_text=_extract_score_text(body_text),
+                    progression_controls=controls,
+                    question_screenshot_uri=question_screenshot_uri,
+                    feedback_screenshot_uri=_capture_screenshot(page, screenshot_dir, "quiz-feedback", timestamp_ms),
+                    attempts_used=max(attempt_number - 1, 1),
+                    attempt_number=max(attempt_number, 1),
+                    confidence=0.0,
+                    answer_strategy="feedback_progression",
+                    feedback_changed_retry=False,
+                    applied_action_label=clicked_progression,
+                    advanced_to_next=True,
+                    stopped_reason=None,
+                )
+                self.history.append(result)
+                return result
+
         if _has_retry_feedback_markers(body_text) and any(control.lower() == "take again" for control in controls) and not retry_reset_recent:
             clicked_retry = _click_progression_control(surface, page, ["take again"])
             result = QuizCaptureResult(
@@ -477,8 +502,10 @@ class LiveQuizController:
         feedback_text = surface.locator("body").inner_text().strip()
         feedback_screenshot_uri = None
         score_text = _extract_score_text(feedback_text)
+        clicked_progression = None
         if score_text or "correctly checked" in feedback_text.lower() or "incorrectly checked" in feedback_text.lower():
             feedback_screenshot_uri = _capture_screenshot(page, screenshot_dir, "quiz-feedback", timestamp_ms)
+            clicked_progression = _click_progression_control(surface, page, [rf"^{label}$" for label in _ALLOWED_RESULTS_CONTROLS])
 
         result = QuizCaptureResult(
             mode=self.mode,
@@ -496,8 +523,9 @@ class LiveQuizController:
             confidence=confidence,
             evidence_references=evidence_refs,
             answer_strategy=answer_strategy,
-            applied_action_label=clicked_submit if applied_any else None,
-            stopped_reason=None if clicked_submit is not None else "quiz_question_not_submitted",
+            applied_action_label=clicked_progression or (clicked_submit if applied_any else None),
+            advanced_to_next=clicked_progression is not None,
+            stopped_reason=None if clicked_progression is not None or clicked_submit is not None else "quiz_question_not_submitted",
         )
         self.history.append(result)
         return result
