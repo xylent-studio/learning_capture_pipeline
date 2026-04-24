@@ -18,6 +18,14 @@ from som_seedtalent_capture.autopilot.page_classifier import (
     VisibleDomSnapshot,
     classify_fixture_page,
 )
+from som_seedtalent_capture.autopilot.runner import (
+    AutopilotRunResult,
+    RunnerDecisionRecord,
+    RunnerEvent,
+    RunnerEventType,
+    RunnerPageSnapshot,
+    run_fixture_autopilot,
+)
 from som_seedtalent_capture.autopilot.state_machine import (
     AutopilotState,
     NavigationAction,
@@ -28,6 +36,7 @@ from som_seedtalent_capture.autopilot.state_machine import (
 
 __all__ = [
     "AutopilotState",
+    "AutopilotRunResult",
     "CapturePlan",
     "CourseDiscoveryResult",
     "CourseInventoryItem",
@@ -39,6 +48,10 @@ __all__ = [
     "QaThresholds",
     "QuizCaptureMode",
     "RecorderProfile",
+    "RunnerDecisionRecord",
+    "RunnerEvent",
+    "RunnerEventType",
+    "RunnerPageSnapshot",
     "VisibleDomSnapshot",
     "build_fixture_capture_plan",
     "build_fixture_capture_plan_from_file",
@@ -46,4 +59,5 @@ __all__ = [
     "decide_next_action",
     "discover_fixture_courses",
     "discover_fixture_courses_from_file",
+    "run_fixture_autopilot",
 ]
