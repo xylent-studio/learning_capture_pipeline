@@ -2,6 +2,10 @@ from pathlib import Path
 
 import pytest
 
+from som_seedtalent_capture.autopilot.capture_plan import RecorderProfile
+from som_seedtalent_capture.autopilot.recorder import RecorderSession, RecorderSessionStatus
+from som_seedtalent_capture.autopilot.runner import AutopilotRunResult, RunnerEvent, RunnerEventType, RunnerPageSnapshot
+from som_seedtalent_capture.autopilot.state_machine import PageKind, PageObservation
 from som_seedtalent_capture.auth import AuthMode, AuthPreflightResult, AuthPreflightStatus
 from som_seedtalent_capture.config import ExternalPathConfig, PilotCourseSelection, PilotCourseSelectionItem, RuntimePilotConfig, SelectorTuningConfig
 from som_seedtalent_capture.permissions import PermissionManifest
@@ -9,6 +13,7 @@ from som_seedtalent_capture.pilot_manifests import PilotBatchStatus, PilotRunSta
 from som_seedtalent_capture.pilot_runtime import (
     build_capture_plans_from_selection,
     build_pilot_plan_bundle,
+    execute_pilot_course,
     load_pilot_plan_bundle,
     prepare_auth_bootstrap,
     run_pilot_batch_skeleton,
@@ -371,3 +376,144 @@ def test_run_pilot_batch_skeleton_marks_runs_ready_after_authenticated_preflight
     assert batch_summary.status == PilotBatchStatus.READY_FOR_LIVE_CAPTURE
     assert batch_summary.counts.ready_for_live_capture_count == 2
     assert scheduler_summary.ready_for_live_capture_count == 2
+
+
+def test_execute_pilot_course_marks_preflight_failure(monkeypatch, tmp_path: Path):
+    config = _config(tmp_path)
+    base_bundle = _bundle(config)
+    bundle = base_bundle.model_copy(update={"plans": [base_bundle.plans[0]]}, deep=True)
+    preflight_path = tmp_path / "artifacts" / "preflight" / "auth-preflight.png"
+    preflight_path.parent.mkdir(parents=True, exist_ok=True)
+    preflight_path.write_text("preflight", encoding="utf-8")
+    monkeypatch.setattr(
+        "som_seedtalent_capture.pilot_runtime.run_auth_preflight",
+        lambda **kwargs: AuthPreflightResult(
+            mode=AuthMode.MANUAL_STORAGE_STATE,
+            status=AuthPreflightStatus.AUTHENTICATED,
+            checked_base_url=kwargs["base_url"],
+            storage_state_path=str(kwargs["storage_state_path"]),
+            account_alias=kwargs["account_alias"],
+            current_url="https://app.seedtalent.com/catalog",
+            screenshot_uri=str(preflight_path),
+        ),
+    )
+    skeleton_summary = run_pilot_course_skeleton(
+        config=config,
+        config_path=tmp_path / "runtime.yaml",
+        plan_bundle=bundle,
+        headless=True,
+    )
+    monkeypatch.setattr(
+        "som_seedtalent_capture.pilot_runtime.run_auth_preflight",
+        lambda **kwargs: AuthPreflightResult(
+            mode=AuthMode.MANUAL_STORAGE_STATE,
+            status=AuthPreflightStatus.AUTH_EXPIRED,
+            checked_base_url=kwargs["base_url"],
+            storage_state_path=str(kwargs["storage_state_path"]),
+            account_alias=kwargs["account_alias"],
+            current_url="https://app.seedtalent.com/login",
+            error_reason="auth_expired",
+        ),
+    )
+
+    summary = execute_pilot_course(
+        config=config,
+        run_manifest_path=skeleton_summary.run_manifest_path,
+        headless=True,
+    )
+
+    assert summary.status == PilotRunStatus.PREFLIGHT_FAILED
+    assert summary.failure_bundle_path is not None
+
+
+def test_execute_pilot_course_updates_manifest_from_runner(monkeypatch, tmp_path: Path):
+    config = _config(tmp_path)
+    base_bundle = _bundle(config)
+    bundle = base_bundle.model_copy(update={"plans": [base_bundle.plans[0]]}, deep=True)
+    preflight_path = tmp_path / "artifacts" / "preflight" / "auth-preflight.png"
+    preflight_path.parent.mkdir(parents=True, exist_ok=True)
+    preflight_path.write_text("preflight", encoding="utf-8")
+    monkeypatch.setattr(
+        "som_seedtalent_capture.pilot_runtime.run_auth_preflight",
+        lambda **kwargs: AuthPreflightResult(
+            mode=AuthMode.MANUAL_STORAGE_STATE,
+            status=AuthPreflightStatus.AUTHENTICATED,
+            checked_base_url=kwargs["base_url"],
+            storage_state_path=str(kwargs["storage_state_path"]),
+            account_alias=kwargs["account_alias"],
+            current_url="https://app.seedtalent.com/catalog",
+            screenshot_uri=str(preflight_path),
+        ),
+    )
+    skeleton_summary = run_pilot_course_skeleton(
+        config=config,
+        config_path=tmp_path / "runtime.yaml",
+        plan_bundle=bundle,
+        headless=True,
+    )
+    recording_dir = tmp_path / "artifacts" / "recordings"
+    recording_dir.mkdir(parents=True, exist_ok=True)
+    video_path = recording_dir / "capture.mp4"
+    video_path.write_text("video", encoding="utf-8")
+    screenshot_path = tmp_path / "artifacts" / "screenshots" / "step-001.png"
+    screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+    screenshot_path.write_text("image", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "som_seedtalent_capture.pilot_runtime.run_visible_session_autopilot",
+        lambda **kwargs: AutopilotRunResult(
+            course_title=kwargs["plan"].course_title,
+            planned_source_url=kwargs["plan"].source_url,
+            artifact_root=str(kwargs["artifact_root"]),
+            recorder_session=RecorderSession(
+                provider_name="ffmpeg_recorder",
+                recorder_profile=RecorderProfile.HEADED_BROWSER_FFMPEG,
+                status=RecorderSessionStatus.STOPPED,
+                video_uri=str(video_path),
+                audio_uri=None,
+            ),
+            page_snapshots=[
+                RunnerPageSnapshot(
+                    execution_url=kwargs["plan"].source_url,
+                    logical_url=kwargs["plan"].source_url,
+                    title="Course Complete",
+                    visible_text="Completed and return to catalog",
+                    headings=["Course Complete"],
+                    buttons=["Return to Catalog"],
+                    links=[],
+                    screenshot_uri=str(screenshot_path),
+                    page_kind=PageKind.COMPLETION_PAGE,
+                    confidence=0.95,
+                )
+            ],
+            observations=[
+                PageObservation(
+                    url=kwargs["plan"].source_url,
+                    title="Course Complete",
+                    page_kind=PageKind.COMPLETION_PAGE,
+                    visible_text_sample="Completed and return to catalog",
+                    buttons=["Return to Catalog"],
+                    links=[],
+                    screenshot_uri=str(screenshot_path),
+                    confidence=0.95,
+                )
+            ],
+            events=[
+                RunnerEvent(event_type=RunnerEventType.RUN_STARTED, timestamp_ms=0),
+                RunnerEvent(event_type=RunnerEventType.PAGE_LOAD, timestamp_ms=1500),
+                RunnerEvent(event_type=RunnerEventType.RUN_COMPLETED, timestamp_ms=2000, screenshot_uri=str(screenshot_path)),
+            ],
+            visited_execution_urls=[kwargs["plan"].source_url],
+            visited_logical_urls=[kwargs["plan"].source_url],
+            completion_detected=True,
+        ),
+    )
+
+    summary = execute_pilot_course(
+        config=config,
+        run_manifest_path=skeleton_summary.run_manifest_path,
+        headless=True,
+    )
+
+    assert summary.status == PilotRunStatus.COMPLETED
+    assert summary.qa_readiness_status == "ready_for_reconstruction"

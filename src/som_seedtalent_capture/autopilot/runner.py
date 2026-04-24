@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from pathlib import Path
 from time import perf_counter
@@ -10,7 +11,7 @@ from playwright.sync_api import Page, sync_playwright
 from pydantic import BaseModel, Field
 
 from som_seedtalent_capture.autopilot.capture_plan import CapturePlan
-from som_seedtalent_capture.autopilot.page_classifier import VisibleDomSnapshot, classify_fixture_page
+from som_seedtalent_capture.autopilot.page_classifier import VisibleDomSnapshot, classify_fixture_page, classify_visible_page
 from som_seedtalent_capture.autopilot.recorder import RecorderProvider, RecorderSession, RecorderStartRequest
 from som_seedtalent_capture.autopilot.state_machine import CaptureDecision, NavigationAction, PageKind, PageObservation, decide_next_action
 
@@ -47,6 +48,7 @@ class RunnerPageSnapshot(BaseModel):
     logical_url: str | None = None
     title: str | None = None
     visible_text: str = ""
+    headings: list[str] = Field(default_factory=list)
     buttons: list[str] = Field(default_factory=list)
     links: list[str] = Field(default_factory=list)
     screenshot_uri: str
@@ -135,6 +137,7 @@ def _build_logical_url_map(plan: CapturePlan, start_url_override: str | None = N
 
 def _extract_visible_snapshot(page: Page) -> VisibleDomSnapshot:
     visible_text = page.locator("body").inner_text()
+    headings = [text.strip() for text in page.locator("h1:visible, h2:visible, h3:visible").all_inner_texts() if text.strip()]
     buttons = [text.strip() for text in page.locator("button:visible").all_inner_texts() if text.strip()]
     links = [text.strip() for text in page.locator("a:visible").all_inner_texts() if text.strip()]
     media_state = page.evaluate(
@@ -154,6 +157,7 @@ def _extract_visible_snapshot(page: Page) -> VisibleDomSnapshot:
         title=page.title(),
         data_page_kind=media_state["dataPageKind"],
         visible_text=visible_text,
+        headings=headings,
         buttons=buttons,
         links=links,
         media={
@@ -171,16 +175,18 @@ def _capture_page(
     step_index: int,
     screenshot_dir: Path,
     logical_url: str | None,
+    classifier=classify_fixture_page,
 ) -> tuple[RunnerPageSnapshot, PageObservation]:
     screenshot_uri = str((screenshot_dir / f"step-{step_index:03d}.png").resolve())
     page.screenshot(path=screenshot_uri, full_page=True)
     snapshot = _extract_visible_snapshot(page)
-    observation = classify_fixture_page(url=page.url, snapshot=snapshot, screenshot_uri=screenshot_uri)
+    observation = classifier(url=page.url, snapshot=snapshot, screenshot_uri=screenshot_uri)
     runner_snapshot = RunnerPageSnapshot(
         execution_url=page.url,
         logical_url=logical_url,
         title=snapshot.title,
         visible_text=snapshot.visible_text,
+        headings=snapshot.headings,
         buttons=snapshot.buttons,
         links=snapshot.links,
         screenshot_uri=screenshot_uri,
@@ -225,6 +231,17 @@ def _click_and_wait(page: Page, locator, timeout_ms: int = 5000) -> str:
     return label
 
 
+def _click_candidate(page: Page, labels: list[str], timeout_ms: int = 5000) -> str | None:
+    for label in labels:
+        button = page.get_by_role("button", name=re.compile(label, re.IGNORECASE)).first
+        if button.count() > 0:
+            return _click_and_wait(page, button, timeout_ms=timeout_ms)
+        link = page.get_by_role("link", name=re.compile(label, re.IGNORECASE)).first
+        if link.count() > 0:
+            return _click_and_wait(page, link, timeout_ms=timeout_ms)
+    return None
+
+
 def _apply_direct_navigation(*, page: Page, observation: PageObservation, plan: CapturePlan, result: AutopilotRunResult) -> str | None:
     if observation.page_kind == PageKind.CATALOG:
         target_basename = _basename_from_url(plan.source_url)
@@ -249,6 +266,33 @@ def _apply_direct_navigation(*, page: Page, observation: PageObservation, plan: 
     if observation.page_kind == PageKind.REPORT_TABLE:
         locator = page.get_by_role("link", name="Completion Page").first
         return _click_and_wait(page, locator)
+
+    return None
+
+
+def _apply_live_navigation(*, page: Page, observation: PageObservation, plan: CapturePlan, result: AutopilotRunResult) -> str | None:
+    if observation.page_kind in {PageKind.CATALOG, PageKind.ASSIGNED_LEARNING}:
+        target_basename = _basename_from_url(plan.source_url)
+        locator = page.locator(f"a[href*='{target_basename}']").first
+        if locator.count() > 0:
+            return _click_and_wait(page, locator)
+        return _click_candidate(page, [plan.course_title, "open course", "launch", "view course"])
+
+    if observation.page_kind == PageKind.COURSE_OVERVIEW:
+        return _click_candidate(page, ["start course", "begin", "resume", "launch", "continue", "open course"])
+
+    if observation.page_kind == PageKind.LESSON_LIST:
+        for lesson_url in plan.lesson_urls:
+            if lesson_url in result.visited_logical_urls:
+                continue
+            lesson_basename = _basename_from_url(lesson_url)
+            locator = page.locator(f"a[href*='{lesson_basename}']").first
+            if locator.count() > 0:
+                return _click_and_wait(page, locator)
+        return _click_candidate(page, ["lesson", "module", "unit", "continue", "next"])
+
+    if observation.page_kind in {PageKind.LESSON_STATIC_TEXT, PageKind.QUIZ_FEEDBACK, PageKind.REPORT_TABLE}:
+        return _click_candidate(page, ["next", "continue", "complete", "finish", "return to catalog"])
 
     return None
 
@@ -322,6 +366,7 @@ def run_fixture_autopilot(
                     step_index=step_index,
                     screenshot_dir=screenshot_dir,
                     logical_url=logical_url,
+                    classifier=classify_fixture_page,
                 )
                 result.page_snapshots.append(snapshot)
                 result.observations.append(observation)
@@ -488,6 +533,195 @@ def run_fixture_autopilot(
                         logical_url=logical_url,
                         page_kind=observation.page_kind,
                         detail=result.stopped_reason,
+                    )
+                )
+                break
+            else:
+                result.stopped_reason = "max_steps_exceeded"
+                result.events.append(
+                    RunnerEvent(
+                        event_type=RunnerEventType.RUN_STOPPED,
+                        timestamp_ms=_timestamp_ms(start),
+                        detail=result.stopped_reason,
+                    )
+                )
+            browser.close()
+    finally:
+        if recorder_provider is not None and recorder_session is not None:
+            recorder_session = recorder_provider.stop(recorder_session)
+            result.recorder_session = recorder_session
+            result.events.append(
+                RunnerEvent(
+                    event_type=RunnerEventType.RECORDER_STOP,
+                    timestamp_ms=_timestamp_ms(start),
+                    detail=recorder_session.provider_name,
+                )
+            )
+
+    return result
+
+
+def run_visible_session_autopilot(
+    *,
+    plan: CapturePlan,
+    artifact_root: str | Path,
+    storage_state_path: str | Path,
+    headless: bool = True,
+    max_steps: int = 20,
+    recorder_provider: RecorderProvider | None = None,
+) -> AutopilotRunResult:
+    artifact_root_path = Path(artifact_root).resolve()
+    screenshot_dir = artifact_root_path / "screenshots"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+
+    logical_url_map = _build_logical_url_map(plan)
+    result = AutopilotRunResult(
+        course_title=plan.course_title,
+        planned_source_url=plan.source_url,
+        artifact_root=str(artifact_root_path),
+    )
+
+    start = perf_counter()
+    result.events.append(
+        RunnerEvent(
+            event_type=RunnerEventType.RUN_STARTED,
+            timestamp_ms=0,
+            logical_url=plan.source_url,
+            detail="visible_session_autopilot_started",
+        )
+    )
+
+    recorder_session: RecorderSession | None = None
+    if recorder_provider is not None:
+        recorder_session = recorder_provider.start(
+            RecorderStartRequest(
+                artifact_root=str(artifact_root_path),
+                course_title=plan.course_title,
+                recorder_profile=plan.recorder_profile,
+            )
+        )
+        result.recorder_session = recorder_session
+        result.events.append(
+            RunnerEvent(
+                event_type=RunnerEventType.RECORDER_START,
+                timestamp_ms=_timestamp_ms(start),
+                logical_url=plan.source_url,
+                detail=recorder_session.provider_name,
+            )
+        )
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=headless)
+            context = browser.new_context(storage_state=str(Path(storage_state_path).resolve()))
+            page = context.new_page()
+            page.goto(plan.source_url, wait_until="domcontentloaded")
+
+            for step_index in range(max_steps):
+                execution_basename = _basename_from_url(page.url)
+                logical_url = logical_url_map.get(execution_basename, page.url)
+
+                snapshot, observation = _capture_page(
+                    page=page,
+                    step_index=step_index,
+                    screenshot_dir=screenshot_dir,
+                    logical_url=logical_url,
+                    classifier=classify_visible_page,
+                )
+                result.page_snapshots.append(snapshot)
+                result.observations.append(observation)
+                _record_page_visit(result, page.url, logical_url)
+
+                timestamp_ms = _timestamp_ms(start)
+                result.events.extend(
+                    [
+                        RunnerEvent(
+                            event_type=RunnerEventType.PAGE_LOAD,
+                            timestamp_ms=timestamp_ms,
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            detail=observation.title or observation.page_kind.value,
+                        ),
+                        RunnerEvent(
+                            event_type=RunnerEventType.SCREENSHOT_CAPTURED,
+                            timestamp_ms=timestamp_ms,
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            screenshot_uri=snapshot.screenshot_uri,
+                        ),
+                    ]
+                )
+
+                decision = decide_next_action(observation)
+                _record_decision(result, observation, decision, logical_url)
+                result.events.append(
+                    RunnerEvent(
+                        event_type=RunnerEventType.DECISION_MADE,
+                        timestamp_ms=timestamp_ms,
+                        execution_url=page.url,
+                        logical_url=logical_url,
+                        page_kind=observation.page_kind,
+                        detail=f"{decision.action.value}:{decision.reason}",
+                    )
+                )
+
+                if observation.page_kind in {PageKind.AUTH_REQUIRED, PageKind.UNKNOWN}:
+                    result.unknown_ui_state_detected = True
+                    result.stopped_reason = "auth_required" if observation.page_kind == PageKind.AUTH_REQUIRED else "unknown_ui_state"
+                    result.events.append(
+                        RunnerEvent(
+                            event_type=RunnerEventType.UNKNOWN_UI_STATE,
+                            timestamp_ms=timestamp_ms,
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            detail=result.stopped_reason,
+                            screenshot_uri=snapshot.screenshot_uri,
+                        )
+                    )
+                    break
+
+                if observation.page_kind == PageKind.COMPLETION_PAGE:
+                    result.completion_detected = True
+                    result.events.append(
+                        RunnerEvent(
+                            event_type=RunnerEventType.RUN_COMPLETED,
+                            timestamp_ms=timestamp_ms,
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            detail="completion_detected",
+                            screenshot_uri=snapshot.screenshot_uri,
+                        )
+                    )
+                    break
+
+                clicked_label = _apply_live_navigation(page=page, observation=observation, plan=plan, result=result)
+                if clicked_label:
+                    result.events.append(
+                        RunnerEvent(
+                            event_type=RunnerEventType.CLICK,
+                            timestamp_ms=_timestamp_ms(start),
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            detail=clicked_label,
+                        )
+                    )
+                    continue
+
+                result.stopped_reason = "no_live_navigation_available"
+                result.events.append(
+                    RunnerEvent(
+                        event_type=RunnerEventType.RUN_STOPPED,
+                        timestamp_ms=timestamp_ms,
+                        execution_url=page.url,
+                        logical_url=logical_url,
+                        page_kind=observation.page_kind,
+                        detail=result.stopped_reason,
+                        screenshot_uri=snapshot.screenshot_uri,
                     )
                 )
                 break

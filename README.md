@@ -134,10 +134,13 @@ som-capture pilot discovery --config <runtime-config.yaml> --headed
 som-capture pilot plans-from-approved --config <runtime-config.yaml>
 som-capture pilot run-course --config <runtime-config.yaml> --plan-bundle <plans.json>
 som-capture pilot run-batch --config <runtime-config.yaml> --plan-bundle <plans.json>
+som-capture pilot execute-course --config <runtime-config.yaml> --run-manifest <run-manifest.json> --headed
 som-capture scheduler dry-run --config <runtime-config.yaml>
 ```
 
 `pilot run-course` and `pilot run-batch` are preflight-first skeletons. They create local batch/run manifests, planned artifact records, QA placeholders, processing manifests, and failure bundles under the external artifact root. They stop at `ready_for_live_capture` after successful auth preflight and do not attempt real course traversal yet.
+
+`pilot execute-course` is the first live-execution surface. It requires an existing `run-manifest.json`, reruns auth preflight, starts recorder orchestration, drives a bounded headed Playwright session through visible UI only, updates the same run manifest with screenshots/observations/diagnostics, and then lets manifest-aware QA mark the run `completed` or `needs_recapture`.
 
 ## Repo map
 

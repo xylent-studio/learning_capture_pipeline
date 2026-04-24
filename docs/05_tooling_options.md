@@ -41,8 +41,8 @@ Use a provider interface. Requirements:
 
 ## Storage
 
-- S3-compatible object storage for raw and processed artifacts.
-- MinIO for local dev.
+- Local artifact roots outside the repo for the first live pilot.
+- Optional S3-compatible object storage after initial live runs are stable.
 - Never commit raw recordings or screenshots.
 
 ## Database

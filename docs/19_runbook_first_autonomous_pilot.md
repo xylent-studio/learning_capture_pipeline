@@ -30,13 +30,14 @@ Prove autonomous capture on a small set of SeedTalent courses.
 10. Run `som-capture pilot plans-from-approved --config <runtime-config.yaml>`.
 11. Run `som-capture pilot run-course --config <runtime-config.yaml> --plan-bundle <plans.json>` to create the first live batch/run manifest set and confirm preflight readiness.
 12. Review the run manifest, preflight output, QA placeholder, and any failure bundle under the external artifact root.
-13. Tune selectors/state classifier if preflight or diagnostics show issues.
-14. Run one real course capture once the live traversal slice exists.
-15. Run `som-capture pilot run-batch --config <runtime-config.yaml> --plan-bundle <plans.json>` when batch-level preflight and one-course live execution are stable.
-16. Process transcript/OCR.
-17. Reconstruct lessons.
-18. Generate draft internal modules.
-19. Review outputs and recapture failures.
+13. Run `som-capture pilot execute-course --config <runtime-config.yaml> --run-manifest <run-manifest.json> --headed` for one approved course.
+14. Review the updated run manifest, diagnostics bundle, recorder metadata, screenshots, and QA result.
+15. Tune selectors/state classifier if preflight or diagnostics show issues.
+16. Run `som-capture pilot run-batch --config <runtime-config.yaml> --plan-bundle <plans.json>` only after one-course live execution is stable.
+17. Process transcript/OCR.
+18. Reconstruct lessons.
+19. Generate draft internal modules.
+20. Review outputs and recapture failures.
 
 ## Pilot success criteria
 

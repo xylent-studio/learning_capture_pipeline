@@ -13,6 +13,7 @@ from som_seedtalent_capture.models import CaptureBatch, CaptureEvent, CaptureEve
 from som_seedtalent_capture.pilot_runtime import (
     build_capture_plans_from_selection,
     build_pilot_plan_bundle,
+    execute_pilot_course,
     load_pilot_plan_bundle,
     prepare_auth_bootstrap,
     run_pilot_batch_skeleton,
@@ -258,6 +259,29 @@ def run_batch(
         },
     )
     console.print(f"Built pilot batch skeleton -> {out}")
+
+
+@pilot_app.command("execute-course")
+def execute_course(
+    config_path: Path = typer.Option(..., "--config"),
+    run_manifest_path: Path = typer.Option(..., "--run-manifest"),
+    out: Path = typer.Option(Path("pilot_execute_summary.json"), "--out"),
+    headless: bool = typer.Option(True, "--headless/--headed"),
+) -> None:
+    config = load_runtime_pilot_config(config_path)
+    FileSystemRuntimeManifestLoader().load(
+        manifest_path=config.external_paths.permission_manifest_path,
+        repo_root=Path.cwd(),
+        secret_root=config.external_paths.secret_root,
+    )
+    summary = execute_pilot_course(
+        config=config,
+        run_manifest_path=run_manifest_path,
+        headless=headless,
+        database_url=os.environ.get("DATABASE_URL"),
+    )
+    write_json(out, summary)
+    console.print(f"Executed pilot course -> {out}")
 
 
 @scheduler_app.command("dry-run")

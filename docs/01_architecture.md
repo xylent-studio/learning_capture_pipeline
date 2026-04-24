@@ -77,8 +77,8 @@ This is closer to a controlled content QA lab than a scraper. The operator may m
 ## Recommended deployment stages
 
 1. Local single-machine capture lab.
-2. Local processing + review dashboard.
-3. Shared object storage and Postgres.
+2. Local artifact-root capture plus local processing + review dashboard.
+3. Optional object storage and Postgres once live capture is stable.
 4. Team review workflow.
 5. Semi-automated capture for repeatable course flows.
 6. Analytics and training recommendation layer.
