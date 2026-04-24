@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import typer
@@ -12,7 +13,10 @@ from som_seedtalent_capture.models import CaptureBatch, CaptureEvent, CaptureEve
 from som_seedtalent_capture.pilot_runtime import (
     build_capture_plans_from_selection,
     build_pilot_plan_bundle,
+    load_pilot_plan_bundle,
     prepare_auth_bootstrap,
+    run_pilot_batch_skeleton,
+    run_pilot_course_skeleton,
     run_visible_catalog_discovery,
 )
 from som_seedtalent_capture.runtime_manifest import FileSystemRuntimeManifestLoader, validate_runtime_manifest_path
@@ -198,6 +202,62 @@ def plans_from_approved(
     plans = build_capture_plans_from_selection(selection=selection, config=config, manifest=manifest)
     write_json(out, build_pilot_plan_bundle(selection=selection, config=config, plans=plans))
     console.print(f"Built capture plans from approved courses -> {out}")
+
+
+@pilot_app.command("run-course")
+def run_course(
+    config_path: Path = typer.Option(..., "--config"),
+    plan_bundle_path: Path = typer.Option(..., "--plan-bundle"),
+    course_url: str | None = typer.Option(None, "--course-url"),
+    out: Path = typer.Option(Path("pilot_run_summary.json"), "--out"),
+    headless: bool = typer.Option(True, "--headless/--headed"),
+) -> None:
+    config = load_runtime_pilot_config(config_path)
+    FileSystemRuntimeManifestLoader().load(
+        manifest_path=config.external_paths.permission_manifest_path,
+        repo_root=Path.cwd(),
+        secret_root=config.external_paths.secret_root,
+    )
+    summary = run_pilot_course_skeleton(
+        config=config,
+        config_path=config_path,
+        plan_bundle=load_pilot_plan_bundle(plan_bundle_path),
+        course_url=course_url,
+        headless=headless,
+        database_url=os.environ.get("DATABASE_URL"),
+    )
+    write_json(out, summary)
+    console.print(f"Built pilot run skeleton -> {out}")
+
+
+@pilot_app.command("run-batch")
+def run_batch(
+    config_path: Path = typer.Option(..., "--config"),
+    plan_bundle_path: Path = typer.Option(..., "--plan-bundle"),
+    out: Path = typer.Option(Path("pilot_batch_summary.json"), "--out"),
+    headless: bool = typer.Option(True, "--headless/--headed"),
+) -> None:
+    config = load_runtime_pilot_config(config_path)
+    FileSystemRuntimeManifestLoader().load(
+        manifest_path=config.external_paths.permission_manifest_path,
+        repo_root=Path.cwd(),
+        secret_root=config.external_paths.secret_root,
+    )
+    batch_summary, scheduler_summary = run_pilot_batch_skeleton(
+        config=config,
+        config_path=config_path,
+        plan_bundle=load_pilot_plan_bundle(plan_bundle_path),
+        headless=headless,
+        database_url=os.environ.get("DATABASE_URL"),
+    )
+    write_json(
+        out,
+        {
+            "batch_summary": batch_summary.model_dump(mode="json"),
+            "scheduler_summary": scheduler_summary.model_dump(mode="json"),
+        },
+    )
+    console.print(f"Built pilot batch skeleton -> {out}")
 
 
 @scheduler_app.command("dry-run")

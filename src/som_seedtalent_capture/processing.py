@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
 from pydantic import BaseModel, Field
 
+from som_seedtalent_capture.artifacts import ArtifactKind, ArtifactRecord
 from som_seedtalent_capture.models import AudioTranscriptSegment
+from som_seedtalent_capture.pilot_manifests import PilotRunManifest
+
+
+class ProcessingStatus(StrEnum):
+    PENDING = "pending"
+    COMPLETED = "completed"
 
 
 class OcrExtractionResult(BaseModel):
@@ -21,6 +29,39 @@ class TranscriptExtractionResult(BaseModel):
     segments: list[AudioTranscriptSegment] = Field(default_factory=list)
     provider_name: str
     notes: str | None = None
+
+
+class OcrWorkItem(BaseModel):
+    capture_session_id: str
+    source_artifact_path: str
+    provider_name: str
+    output_artifact_path: str
+    notes: str | None = None
+
+
+class TranscriptWorkItem(BaseModel):
+    capture_session_id: str
+    source_artifact_path: str
+    provider_name: str
+    output_artifact_path: str
+    notes: str | None = None
+
+
+class ProcessingManifest(BaseModel):
+    run_id: str
+    capture_session_id: str
+    status: ProcessingStatus = ProcessingStatus.PENDING
+    ocr_work_items: list[OcrWorkItem] = Field(default_factory=list)
+    transcript_work_items: list[TranscriptWorkItem] = Field(default_factory=list)
+    output_artifacts: list[ArtifactRecord] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class ProcessingBundleResult(BaseModel):
+    manifest: ProcessingManifest
+    ocr_results: list[OcrExtractionResult] = Field(default_factory=list)
+    transcript_results: list[TranscriptExtractionResult] = Field(default_factory=list)
+    status: ProcessingStatus = ProcessingStatus.PENDING
 
 
 class OcrProvider(Protocol):
@@ -97,3 +138,53 @@ class LocalTranscriptionStubProvider:
                 )
             ],
         )
+
+
+def build_processing_manifest(run_manifest: PilotRunManifest) -> ProcessingManifest:
+    artifact_by_kind = {artifact.kind: artifact for artifact in run_manifest.planned_artifacts}
+    ocr_items: list[OcrWorkItem] = []
+    transcript_items: list[TranscriptWorkItem] = []
+
+    screenshot_folder = artifact_by_kind.get(ArtifactKind.SCREENSHOT_FOLDER)
+    if screenshot_folder is not None:
+        ocr_output = artifact_by_kind.get(ArtifactKind.OCR_OUTPUT)
+        ocr_items.append(
+            OcrWorkItem(
+                capture_session_id=run_manifest.capture_session_id,
+                source_artifact_path=screenshot_folder.local_path,
+                provider_name="local_ocr_stub",
+                output_artifact_path=ocr_output.local_path if ocr_output else screenshot_folder.local_path,
+                notes="Run through OCR after live capture artifacts exist.",
+            )
+        )
+
+    audio_recording = artifact_by_kind.get(ArtifactKind.AUDIO_RECORDING)
+    if audio_recording is not None:
+        transcript_output = artifact_by_kind.get(ArtifactKind.TRANSCRIPT_OUTPUT)
+        transcript_items.append(
+            TranscriptWorkItem(
+                capture_session_id=run_manifest.capture_session_id,
+                source_artifact_path=audio_recording.local_path,
+                provider_name="local_transcription_stub",
+                output_artifact_path=transcript_output.local_path if transcript_output else audio_recording.local_path,
+                notes="Run through transcription after live capture artifacts exist.",
+            )
+        )
+
+    output_artifacts = [
+        artifact for artifact in run_manifest.planned_artifacts if artifact.kind in {ArtifactKind.OCR_OUTPUT, ArtifactKind.TRANSCRIPT_OUTPUT}
+    ]
+
+    notes = ["Processing manifest created from planned artifacts."]
+    if not run_manifest.runner_executed:
+        notes.append("Runner has not executed yet; work items are placeholders.")
+
+    return ProcessingManifest(
+        run_id=run_manifest.run_id,
+        capture_session_id=run_manifest.capture_session_id,
+        status=ProcessingStatus.PENDING,
+        ocr_work_items=ocr_items,
+        transcript_work_items=transcript_items,
+        output_artifacts=output_artifacts,
+        notes=notes,
+    )

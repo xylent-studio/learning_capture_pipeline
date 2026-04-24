@@ -15,6 +15,7 @@ def _slugify(value: str) -> str:
 class ArtifactKind(StrEnum):
     SCREEN_RECORDING = "screen_recording"
     AUDIO_RECORDING = "audio_recording"
+    SCREENSHOT_FOLDER = "screenshot_folder"
     SCREENSHOT = "screenshot"
     PREFLIGHT_CAPTURE = "preflight_capture"
     QA_REPORT = "qa_report"
@@ -46,6 +47,9 @@ class ArtifactStore(Protocol):
         ...
 
     def build_record(self, *, layout: RunArtifactLayout, kind: ArtifactKind, name: str, extension: str) -> ArtifactRecord:
+        ...
+
+    def build_directory_record(self, *, layout: RunArtifactLayout, kind: ArtifactKind) -> ArtifactRecord:
         ...
 
 
@@ -93,4 +97,17 @@ class LocalArtifactStore:
             local_path=str(local_path.resolve()),
             relative_path=str(relative_path),
             metadata={"directory": directory.name},
+        )
+
+    def build_directory_record(self, *, layout: RunArtifactLayout, kind: ArtifactKind) -> ArtifactRecord:
+        directory_map = {
+            ArtifactKind.SCREENSHOT_FOLDER: Path(layout.screenshots_dir),
+        }
+        directory = directory_map[kind]
+        relative_path = directory.relative_to(Path(layout.batch_root).parent)
+        return ArtifactRecord(
+            kind=kind,
+            local_path=str(directory.resolve()),
+            relative_path=str(relative_path),
+            metadata={"directory": directory.name, "artifact_type": "directory"},
         )

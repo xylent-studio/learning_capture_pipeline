@@ -1,7 +1,14 @@
 from som_seedtalent_capture.autopilot.capture_plan import CapturePlan, QaThresholds, QuizCaptureMode, RecorderProfile
 from som_seedtalent_capture.autopilot.qa import AutopilotQAResult, AutopilotReadinessStatus
 from som_seedtalent_capture.models import CaptureQAReport, RightsStatus
-from som_seedtalent_capture.scheduler import SchedulerConfig, build_scheduler_queue, should_stop_for_auth_failures, summarize_scheduler_results
+from som_seedtalent_capture.scheduler import (
+    SchedulerConfig,
+    SchedulerItemStatus,
+    build_scheduler_queue,
+    mark_queue_ready_for_live_capture,
+    should_stop_for_auth_failures,
+    summarize_scheduler_results,
+)
 
 
 def _plan(course_title: str) -> CapturePlan:
@@ -20,7 +27,7 @@ def _plan(course_title: str) -> CapturePlan:
 
 def test_scheduler_queue_and_summary():
     plans = [_plan("Course One"), _plan("Course Two")]
-    queue = build_scheduler_queue(plans, SchedulerConfig())
+    queue = mark_queue_ready_for_live_capture(build_scheduler_queue(plans, SchedulerConfig()))
     summary = summarize_scheduler_results(
         queue=queue,
         qa_results=[
@@ -39,9 +46,11 @@ def test_scheduler_queue_and_summary():
 
     assert len(queue) == 2
     assert summary.total_courses == 2
+    assert summary.ready_for_live_capture_count == 2
     assert summary.ready_for_reconstruction_count == 1
     assert summary.needs_recapture_count == 1
     assert summary.stopped_for_auth_failures is True
+    assert queue[0].status == SchedulerItemStatus.READY_FOR_LIVE_CAPTURE
 
 
 def test_should_stop_for_auth_failures_ignores_non_auth_reasons():

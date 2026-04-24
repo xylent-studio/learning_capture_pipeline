@@ -39,5 +39,8 @@ def test_reconstruct_capture_outputs_creates_cited_chunks_and_flags_low_confiden
     assert len(result.lessons) == 1
     assert len(result.chunks) == 3
     assert result.low_confidence_chunk_count == 2
+    assert len(result.low_confidence_chunk_ids) == 2
     assert all(chunk.review_status == ReviewStatus.NEEDS_REVIEW for chunk in result.chunks)
     assert any(chunk.source_screenshot_uri for chunk in result.chunks)
+    assert result.chunk_counts_by_type["transcript"] == 2
+    assert result.chunk_counts_by_type["ocr"] == 1
