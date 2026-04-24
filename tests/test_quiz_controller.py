@@ -6,7 +6,7 @@ from playwright.sync_api import Error, sync_playwright
 from som_seedtalent_capture.autopilot.capture_plan import QuizCaptureMode, build_fixture_capture_plan_from_file
 from som_seedtalent_capture.autopilot.course_discovery import discover_fixture_courses_from_file
 from som_seedtalent_capture.autopilot.media_controller import FixtureMediaController
-from som_seedtalent_capture.autopilot.quiz_controller import FixtureQuizController, LiveQuizController, QuizEvidenceSnippet
+from som_seedtalent_capture.autopilot.quiz_controller import FixtureQuizController, LiveQuizController, QuizCaptureResult, QuizEvidenceSnippet
 from som_seedtalent_capture.autopilot.runner import run_fixture_autopilot
 from som_seedtalent_capture.autopilot.state_machine import PageKind, PageObservation
 from som_seedtalent_capture.permissions import load_permission_manifest
@@ -354,6 +354,150 @@ def test_live_quiz_controller_results_state_prefers_next_over_take_again(monkeyp
 
     assert result.applied_action_label == "CONTINUE"
     assert result.advanced_to_next is True
+
+
+def test_live_quiz_controller_resets_feedback_state_before_retry(tmp_path: Path):
+    class _ButtonLocator:
+        def __init__(self, values: list[dict[str, str | bool]]) -> None:
+            self._values = values
+
+        def filter(self, has_text):  # noqa: ANN001
+            return _ButtonLocator([value for value in self._values if has_text.search(str(value["text"]))])
+
+        def count(self) -> int:
+            return len(self._values)
+
+        def nth(self, index: int):
+            return _SingleButtonLocator(self._values[index])
+
+    class _SingleButtonLocator:
+        def __init__(self, value: dict[str, str | bool]) -> None:
+            self._value = value
+
+        def inner_text(self):
+            return str(self._value["text"])
+
+        def is_visible(self):
+            return bool(self._value["visible"])
+
+        def is_enabled(self):
+            return bool(self._value["enabled"])
+
+        def get_attribute(self, name: str):
+            if name == "aria-hidden":
+                return "false"
+            if name == "aria-disabled":
+                return "false"
+            if name == "class":
+                return ""
+            return None
+
+        def scroll_into_view_if_needed(self, timeout: int = 0):  # noqa: ARG002
+            return None
+
+        def click(self, timeout: int = 0):  # noqa: ARG002
+            self._value["clicked"] = True
+            return None
+
+    class _StaticLocator:
+        def __init__(self, *, body_text: str = "", values: list[str] | None = None) -> None:
+            self._body_text = body_text
+            self._values = values or []
+
+        def inner_text(self) -> str:
+            return self._body_text
+
+        def all_inner_texts(self) -> list[str]:
+            return self._values
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            return 0
+
+        def filter(self, has_text):  # noqa: ANN001
+            del has_text
+            return self
+
+    buttons = [
+        {"text": "TAKE AGAIN", "visible": True, "enabled": True},
+        {"text": "SUBMIT", "visible": True, "enabled": True},
+    ]
+
+    class _FakeSurface:
+        def locator(self, selector: str):
+            if selector == "body":
+                return _StaticLocator(
+                    body_text=(
+                        "Incorrect. Correct answer: Clean and well-run cultivation centers. "
+                        "Your answer: The highest THC %. TAKE AGAIN SUBMIT"
+                    )
+                )
+            if selector == "h1:visible, h2:visible, h3:visible":
+                return _StaticLocator(values=["Question 01/02"])
+            if selector == "label:visible":
+                return _StaticLocator(values=["Clean and well-run cultivation centers", "The highest THC %"])
+            if selector == "button:visible":
+                return _StaticLocator(values=[str(button["text"]) for button in buttons])
+            if selector == "button, a, [role='button']":
+                return _ButtonLocator(buttons)
+            raise AssertionError(selector)
+
+        def get_by_label(self, pattern):  # noqa: ANN001
+            del pattern
+
+            class _NoopLabel:
+                @property
+                def first(self):
+                    return self
+
+                def count(self):
+                    return 0
+
+                def click(self, force: bool = False):  # noqa: ARG002
+                    return None
+
+            return _NoopLabel()
+
+    class _FakePage:
+        url = "https://app.seedtalent.com/course/example"
+
+        def screenshot(self, path: str, full_page: bool = True):  # noqa: ARG002
+            Path(path).write_text("image", encoding="utf-8")
+
+        def wait_for_timeout(self, timeout_ms: int):  # noqa: ARG002
+            return None
+
+    controller = LiveQuizController(mode=QuizCaptureMode.CAPTURE_AND_COMPLETE_ON_CAPTURE_ACCOUNT)
+    controller.history.append(
+        QuizCaptureResult(
+            mode=QuizCaptureMode.CAPTURE_AND_COMPLETE_ON_CAPTURE_ACCOUNT,
+            page_kind=PageKind.QUIZ_QUESTION,
+            question_text="What is important to the Seed & Strain Growers? (select all that apply)",
+            options=["Clean and well-run cultivation centers", "The highest THC %"],
+            question_screenshot_uri=str(tmp_path / "previous-question.png"),
+            feedback_screenshot_uri=str(tmp_path / "previous-feedback.png"),
+            feedback_text="Incorrectly checked The highest THC %",
+            attempts_used=1,
+            attempt_number=1,
+        )
+    )
+
+    result = controller.run(
+        page=_FakePage(),
+        surface=_FakeSurface(),
+        observation=PageObservation(url="https://app.seedtalent.com/course/example", page_kind=PageKind.QUIZ_QUESTION),
+        screenshot_dir=tmp_path,
+        logical_url="https://app.seedtalent.com/course/example",
+        timestamp_ms=880,
+        evidence_snippets=[],
+    )
+
+    assert result.answer_strategy == "feedback_retry_reset"
+    assert result.applied_action_label == "TAKE AGAIN"
+    assert result.feedback_changed_retry is True
 
 
 def test_runner_reaches_completion_with_real_quiz_controller(tmp_path: Path):

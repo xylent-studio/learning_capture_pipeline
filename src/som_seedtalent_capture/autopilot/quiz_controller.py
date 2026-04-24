@@ -133,6 +133,14 @@ def _build_retry_feedback_map(feedback_text: str, options: list[str]) -> tuple[l
     return correct, incorrect
 
 
+def _has_retry_feedback_markers(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        marker in lowered
+        for marker in {"correct answer:", "your answer:", "correctly checked", "incorrectly checked", "incorrect."}
+    )
+
+
 def _score_options_against_evidence(question_text: str | None, options: list[str], snippets: list[QuizEvidenceSnippet]) -> tuple[list[str], float, list[str]]:
     if not options or not snippets:
         return [], 0.0, []
@@ -416,8 +424,37 @@ class LiveQuizController:
 
         selected_answers, confidence, evidence_refs = _score_options_against_evidence(question_text, options, evidence_snippets)
         answer_strategy = "evidence_grounded" if selected_answers and confidence >= self.evidence_threshold else "fallback_selection"
+        prior_feedback = next((item.feedback_text for item in reversed(self.history) if item.feedback_text), None)
+        retry_reset_recent = bool(
+            self.history
+            and self.history[-1].answer_strategy == "feedback_retry_reset"
+            and self.history[-1].question_text == question_text
+        )
+        if prior_feedback and _has_retry_feedback_markers(body_text) and any(control.lower() == "take again" for control in controls) and not retry_reset_recent:
+            clicked_retry = _click_progression_control(surface, page, ["take again"])
+            result = QuizCaptureResult(
+                mode=self.mode,
+                page_kind=observation.page_kind,
+                question_text=question_text,
+                options=options,
+                feedback_text=body_text,
+                score_text=_extract_score_text(body_text),
+                progression_controls=controls,
+                question_screenshot_uri=question_screenshot_uri,
+                feedback_screenshot_uri=_capture_screenshot(page, screenshot_dir, "quiz-feedback", timestamp_ms),
+                attempts_used=max(attempt_number - 1, 1),
+                attempt_number=max(attempt_number, 1),
+                confidence=0.0,
+                answer_strategy="feedback_retry_reset",
+                feedback_changed_retry=clicked_retry is not None,
+                applied_action_label=clicked_retry,
+                advanced_to_next=False,
+                stopped_reason=None if clicked_retry is not None else "quiz_retry_not_started",
+            )
+            self.history.append(result)
+            return result
+
         if not selected_answers:
-            prior_feedback = next((item.feedback_text for item in reversed(self.history) if item.feedback_text), None)
             if prior_feedback:
                 correct, incorrect = _build_retry_feedback_map(prior_feedback, options)
                 selected_answers = [option for option in correct if option not in incorrect]
