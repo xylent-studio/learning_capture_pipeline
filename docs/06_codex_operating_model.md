@@ -33,6 +33,11 @@ Human reviewer:
 5. Require tests and a self-review.
 6. Use `/review` or a separate Codex task before merging.
 7. Promote repeated prompts into `.agents/skills`.
+8. Promote repeated live-debug findings into one of the canonical truth surfaces instead of leaving them in ad hoc notes:
+   - repo findings docs for durable patterns
+   - runtime-generated digests for latest live truth
+   - `_intel` checkpoints for continuity
+   - run manifests for execution truth
 
 ## Prompt structure
 
@@ -70,3 +75,11 @@ Before merge, require Codex to answer:
 - Are source citations preserved?
 - Do outputs default to `needs_review`?
 - What tests were run?
+
+## Live pilot continuity rule
+
+When a live SeedTalent debugging session teaches a reusable UI truth, do not leave that learning only in chat or a one-off file. Promote it into:
+
+1. [20_live_seedtalent_findings.md](/C:/dev/Learning%20Capture%20Pipeline/docs/20_live_seedtalent_findings.md) if it is a durable real-UI pattern.
+2. The runtime live findings digest if it is current run truth.
+3. `_intel` if it changes the next re-entry path.

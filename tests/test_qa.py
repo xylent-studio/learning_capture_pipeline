@@ -12,7 +12,7 @@ from som_seedtalent_capture.autopilot.quiz_controller import FixtureQuizControll
 from som_seedtalent_capture.autopilot.recorder import FakeRecorderProvider
 from som_seedtalent_capture.autopilot.runner import run_fixture_autopilot
 from som_seedtalent_capture.permissions import load_permission_manifest
-from som_seedtalent_capture.pilot_manifests import PilotRunManifest, PilotRunStatus, RunDiagnosticsSnapshot
+from som_seedtalent_capture.pilot_manifests import FailureCategory, PilotRunManifest, PilotRunStatus, RunDiagnosticsSnapshot
 
 
 FIXTURE_ROOT = Path("tests/fixtures/fake_seedtalent")
@@ -166,3 +166,23 @@ def test_evaluate_pilot_run_manifest_flags_preflight_and_artifact_failures(tmp_p
     assert qa_result.readiness_status == AutopilotReadinessStatus.NEEDS_RECAPTURE
     assert RecaptureReason.PREFLIGHT_FAILED in qa_result.recapture_reasons
     assert RecaptureReason.PROHIBITED_PATH_DETECTED in qa_result.recapture_reasons
+
+
+def test_evaluate_pilot_run_manifest_maps_current_blocker_category(tmp_path: Path):
+    manifest = _pilot_run_manifest(tmp_path, lifecycle_status=PilotRunStatus.NEEDS_RECAPTURE).model_copy(
+        update={
+            "runner_executed": True,
+            "current_blocker_category": FailureCategory.QUIZ_RESULTS_EXIT_UNHANDLED,
+            "runner_stop_reason": "quiz_results_exit_unhandled",
+            "page_observation_count": 3,
+            "screenshot_uris": [str(tmp_path / "artifacts" / "screenshots" / "step-001.png")],
+        },
+        deep=True,
+    )
+    Path(manifest.screenshot_uris[0]).parent.mkdir(parents=True, exist_ok=True)
+    Path(manifest.screenshot_uris[0]).write_text("image", encoding="utf-8")
+
+    qa_result = evaluate_pilot_run_manifest(run_manifest=manifest)
+
+    assert qa_result.readiness_status == AutopilotReadinessStatus.NEEDS_RECAPTURE
+    assert RecaptureReason.QUIZ_RESULTS_EXIT_UNHANDLED in qa_result.recapture_reasons

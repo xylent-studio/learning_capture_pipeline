@@ -86,6 +86,11 @@ class PlaywrightVisibleAuthPreflight:
         self._auth_expired_indicators = [value.lower() for value in auth_expired_indicators]
         self._prohibited_path_patterns = prohibited_path_patterns
         self._headless = headless
+        self._post_load_timeout_ms = 15000
+        self._poll_interval_ms = 500
+
+    def _read_visible_state_summary(self, page) -> str:
+        return " ".join(page.locator("body").inner_text().split())
 
     def run(
         self,
@@ -102,7 +107,22 @@ class PlaywrightVisibleAuthPreflight:
             context = browser.new_context(storage_state=str(storage_state_path))
             page = context.new_page()
             page.goto(base_url, wait_until="domcontentloaded")
-            visible_state_summary = " ".join(page.locator("body").inner_text().split())
+            visible_state_summary = ""
+            elapsed_ms = 0
+            while elapsed_ms < self._post_load_timeout_ms:
+                visible_state_summary = self._read_visible_state_summary(page)
+                visible_state_lower = visible_state_summary.lower()
+                current_url = page.url
+                if visible_state_summary:
+                    authenticated = any(indicator in visible_state_lower for indicator in self._authenticated_indicators)
+                    expired = any(indicator in visible_state_lower for indicator in self._auth_expired_indicators)
+                    prohibited = any(pattern in current_url for pattern in self._prohibited_path_patterns)
+                    if authenticated or expired or prohibited:
+                        break
+                page.wait_for_timeout(self._poll_interval_ms)
+                elapsed_ms += self._poll_interval_ms
+            if not visible_state_summary:
+                visible_state_summary = self._read_visible_state_summary(page)
             page.screenshot(path=screenshot_uri, full_page=True)
             current_url = page.url
             browser.close()

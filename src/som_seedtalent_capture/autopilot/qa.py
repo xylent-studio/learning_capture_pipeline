@@ -10,7 +10,7 @@ from som_seedtalent_capture.autopilot.runner import AutopilotRunResult
 from som_seedtalent_capture.autopilot.state_machine import PageKind
 from som_seedtalent_capture.artifacts import ArtifactKind
 from som_seedtalent_capture.models import CaptureQAReport, ReviewStatus
-from som_seedtalent_capture.pilot_manifests import PilotRunManifest, PilotRunStatus
+from som_seedtalent_capture.pilot_manifests import FailureCategory, PilotRunManifest, PilotRunStatus
 
 
 class RecaptureReason(StrEnum):
@@ -26,6 +26,12 @@ class RecaptureReason(StrEnum):
     TOO_SHORT_RUN_DURATION = "too_short_run_duration"
     RUNNER_NOT_EXECUTED = "runner_not_executed"
     MISSING_PLANNED_ARTIFACTS = "missing_planned_artifacts"
+    SHELL_READY_BUT_FRAME_LOADING = "shell_ready_but_frame_loading"
+    SCORM_FRAME_NOT_READY = "scorm_frame_not_ready"
+    LESSON_GATE_UNHANDLED = "lesson_gate_unhandled"
+    QUIZ_RESULTS_EXIT_UNHANDLED = "quiz_results_exit_unhandled"
+    SELECTOR_PRIORITY_MISFIRE = "selector_priority_misfire"
+    REPEATED_SAME_STATE = "repeated_same_state"
 
 
 class AutopilotReadinessStatus(StrEnum):
@@ -180,6 +186,17 @@ def evaluate_pilot_run_manifest(
 
     if run_manifest.unknown_ui_state_detected:
         recapture_reasons.append(RecaptureReason.UNKNOWN_UI_STATE)
+
+    blocker_reason_map = {
+        FailureCategory.SHELL_READY_BUT_FRAME_LOADING: RecaptureReason.SHELL_READY_BUT_FRAME_LOADING,
+        FailureCategory.SCORM_FRAME_NOT_READY: RecaptureReason.SCORM_FRAME_NOT_READY,
+        FailureCategory.LESSON_GATE_UNHANDLED: RecaptureReason.LESSON_GATE_UNHANDLED,
+        FailureCategory.QUIZ_RESULTS_EXIT_UNHANDLED: RecaptureReason.QUIZ_RESULTS_EXIT_UNHANDLED,
+        FailureCategory.SELECTOR_PRIORITY_MISFIRE: RecaptureReason.SELECTOR_PRIORITY_MISFIRE,
+        FailureCategory.REPEATED_SAME_STATE: RecaptureReason.REPEATED_SAME_STATE,
+    }
+    if run_manifest.current_blocker_category in blocker_reason_map:
+        recapture_reasons.append(blocker_reason_map[run_manifest.current_blocker_category])
 
     if {"lesson_video", "lesson_audio"} & observed_page_kinds and (audio_artifact is None or not Path(audio_artifact.local_path).exists()):
         recapture_reasons.append(RecaptureReason.MISSING_AUDIO)

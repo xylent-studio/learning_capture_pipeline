@@ -9,7 +9,7 @@ from som_seedtalent_capture.autopilot.state_machine import PageKind, PageObserva
 from som_seedtalent_capture.auth import AuthMode, AuthPreflightResult, AuthPreflightStatus
 from som_seedtalent_capture.config import ExternalPathConfig, PilotCourseSelection, PilotCourseSelectionItem, RuntimePilotConfig, SelectorTuningConfig
 from som_seedtalent_capture.permissions import PermissionManifest
-from som_seedtalent_capture.pilot_manifests import PilotBatchStatus, PilotRunStatus
+from som_seedtalent_capture.pilot_manifests import FailureCategory, PilotBatchStatus, PilotRunManifest, PilotRunStatus, read_model_json
 from som_seedtalent_capture.pilot_runtime import (
     build_capture_plans_from_selection,
     build_pilot_plan_bundle,
@@ -19,6 +19,7 @@ from som_seedtalent_capture.pilot_runtime import (
     run_pilot_batch_skeleton,
     run_pilot_course_skeleton,
     run_visible_catalog_discovery,
+    summarize_pilot_run,
 )
 
 
@@ -476,6 +477,11 @@ def test_execute_pilot_course_updates_manifest_from_runner(monkeypatch, tmp_path
                 RunnerPageSnapshot(
                     execution_url=kwargs["plan"].source_url,
                     logical_url=kwargs["plan"].source_url,
+                    outer_page_url=kwargs["plan"].source_url,
+                    outer_page_title="Seed Talent",
+                    active_capture_surface_type="frame",
+                    active_capture_surface_name="scormdriver_content",
+                    active_capture_surface_url=kwargs["plan"].source_url,
                     title="Course Complete",
                     visible_text="Completed and return to catalog",
                     headings=["Course Complete"],
@@ -517,3 +523,154 @@ def test_execute_pilot_course_updates_manifest_from_runner(monkeypatch, tmp_path
 
     assert summary.status == PilotRunStatus.COMPLETED
     assert summary.qa_readiness_status == "ready_for_reconstruction"
+
+
+def test_execute_pilot_course_records_attempt_history_and_digest(monkeypatch, tmp_path: Path):
+    config = _config(tmp_path)
+    base_bundle = _bundle(config)
+    bundle = base_bundle.model_copy(update={"plans": [base_bundle.plans[0]]}, deep=True)
+    preflight_path = tmp_path / "artifacts" / "preflight" / "auth-preflight.png"
+    preflight_path.parent.mkdir(parents=True, exist_ok=True)
+    preflight_path.write_text("preflight", encoding="utf-8")
+    monkeypatch.setattr(
+        "som_seedtalent_capture.pilot_runtime.run_auth_preflight",
+        lambda **kwargs: AuthPreflightResult(
+            mode=AuthMode.MANUAL_STORAGE_STATE,
+            status=AuthPreflightStatus.AUTHENTICATED,
+            checked_base_url=kwargs["base_url"],
+            storage_state_path=str(kwargs["storage_state_path"]),
+            account_alias=kwargs["account_alias"],
+            current_url="https://app.seedtalent.com/catalog",
+            screenshot_uri=str(preflight_path),
+        ),
+    )
+    skeleton_summary = run_pilot_course_skeleton(
+        config=config,
+        config_path=tmp_path / "runtime.yaml",
+        plan_bundle=bundle,
+        headless=True,
+    )
+    screenshot_path = tmp_path / "artifacts" / "screenshots" / "step-001.png"
+    screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+    screenshot_path.write_text("image", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "som_seedtalent_capture.pilot_runtime.run_visible_session_autopilot",
+        lambda **kwargs: AutopilotRunResult(
+            course_title=kwargs["plan"].course_title,
+            planned_source_url=kwargs["plan"].source_url,
+            artifact_root=str(kwargs["artifact_root"]),
+            page_snapshots=[
+                RunnerPageSnapshot(
+                    execution_url="https://cdn.example/scormcontent/index.html#/quiz/example",
+                    logical_url=kwargs["plan"].source_url,
+                    outer_page_url=kwargs["plan"].source_url,
+                    outer_page_title="Seed Talent",
+                    active_capture_surface_type="frame",
+                    active_capture_surface_name="scormdriver_content",
+                    active_capture_surface_url="https://cdn.example/scormcontent/index.html#/quiz/example",
+                    title="Seed Talent",
+                    visible_text="Quiz Results You scored 50% and did not pass. Next Take Again",
+                    headings=["Quiz Results"],
+                    buttons=["NEXT", "TAKE AGAIN"],
+                    links=[],
+                    screenshot_uri=str(screenshot_path),
+                    page_kind=PageKind.QUIZ_RESULTS,
+                    confidence=0.95,
+                )
+            ],
+            observations=[
+                PageObservation(
+                    url="https://cdn.example/scormcontent/index.html#/quiz/example",
+                    title="Seed Talent",
+                    page_kind=PageKind.QUIZ_RESULTS,
+                    visible_text_sample="Quiz Results You scored 50% and did not pass.",
+                    buttons=["NEXT", "TAKE AGAIN"],
+                    links=[],
+                    screenshot_uri=str(screenshot_path),
+                    confidence=0.95,
+                )
+            ],
+            events=[
+                RunnerEvent(event_type=RunnerEventType.RUN_STARTED, timestamp_ms=0),
+                RunnerEvent(event_type=RunnerEventType.PAGE_LOAD, timestamp_ms=500),
+                RunnerEvent(event_type=RunnerEventType.RUN_STOPPED, timestamp_ms=1200, screenshot_uri=str(screenshot_path)),
+            ],
+            visited_execution_urls=["https://cdn.example/scormcontent/index.html#/quiz/example"],
+            visited_logical_urls=[kwargs["plan"].source_url],
+            completion_detected=False,
+            stopped_reason="quiz_results_exit_unhandled",
+            failure_category=FailureCategory.QUIZ_RESULTS_EXIT_UNHANDLED,
+            active_capture_surface="frame:scormdriver_content",
+        ),
+    )
+
+    summary = execute_pilot_course(
+        config=config,
+        run_manifest_path=skeleton_summary.run_manifest_path,
+        headless=True,
+    )
+    manifest = read_model_json(summary.run_manifest_path, PilotRunManifest)
+    digest = summarize_pilot_run(config=config, run_manifest_path=summary.run_manifest_path)
+
+    assert summary.status == PilotRunStatus.NEEDS_RECAPTURE
+    assert manifest.current_blocker_category == FailureCategory.QUIZ_RESULTS_EXIT_UNHANDLED
+    assert manifest.recommended_next_action is not None
+    assert len(manifest.attempts) == 1
+    assert manifest.attempts[0].failure_category == FailureCategory.QUIZ_RESULTS_EXIT_UNHANDLED
+    assert digest.attempt_count == 1
+    assert digest.current_blocker_category == FailureCategory.QUIZ_RESULTS_EXIT_UNHANDLED
+    assert digest.active_capture_surface == "frame:scormdriver_content"
+    assert (config.external_paths.secret_root / "outputs" / "live-findings-digest.json").exists()
+
+
+def test_summarize_pilot_run_infers_quiz_results_blocker_from_legacy_manifest(monkeypatch, tmp_path: Path):
+    config = _config(tmp_path)
+    base_bundle = _bundle(config)
+    bundle = base_bundle.model_copy(update={"plans": [base_bundle.plans[0]]}, deep=True)
+    preflight_path = tmp_path / "artifacts" / "preflight" / "auth-preflight.png"
+    preflight_path.parent.mkdir(parents=True, exist_ok=True)
+    preflight_path.write_text("preflight", encoding="utf-8")
+    monkeypatch.setattr(
+        "som_seedtalent_capture.pilot_runtime.run_auth_preflight",
+        lambda **kwargs: AuthPreflightResult(
+            mode=AuthMode.MANUAL_STORAGE_STATE,
+            status=AuthPreflightStatus.AUTHENTICATED,
+            checked_base_url=kwargs["base_url"],
+            storage_state_path=str(kwargs["storage_state_path"]),
+            account_alias=kwargs["account_alias"],
+            current_url="https://app.seedtalent.com/catalog",
+            screenshot_uri=str(preflight_path),
+        ),
+    )
+    skeleton_summary = run_pilot_course_skeleton(
+        config=config,
+        config_path=tmp_path / "runtime.yaml",
+        plan_bundle=bundle,
+        headless=True,
+    )
+    manifest = read_model_json(skeleton_summary.run_manifest_path, PilotRunManifest)
+    manifest = manifest.model_copy(
+        update={
+            "lifecycle_status": PilotRunStatus.NEEDS_RECAPTURE,
+            "runner_executed": True,
+            "runner_stop_reason": "max_steps_exceeded",
+            "observed_page_kinds": ["quiz_question"],
+            "diagnostics_snapshot": manifest.diagnostics_snapshot.model_copy(
+                update={
+                    "current_url": "https://cdn.example/scormcontent/index.html#/quiz/example",
+                    "visible_headings": ["Quiz Results"],
+                    "visible_buttons": ["NEXT", "TAKE AGAIN"],
+                    "classifier_page_kind": "quiz_question",
+                },
+                deep=True,
+            ),
+        },
+        deep=True,
+    )
+    Path(skeleton_summary.run_manifest_path).write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+
+    digest = summarize_pilot_run(config=config, run_manifest_path=skeleton_summary.run_manifest_path)
+
+    assert digest.current_blocker_category == FailureCategory.QUIZ_RESULTS_EXIT_UNHANDLED
+    assert digest.active_capture_surface == "frame:https://cdn.example/scormcontent/index.html#/quiz/example"

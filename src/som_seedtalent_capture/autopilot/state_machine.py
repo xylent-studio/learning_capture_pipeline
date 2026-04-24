@@ -40,14 +40,19 @@ class PageKind(StrEnum):
     DASHBOARD = "dashboard"
     CATALOG = "catalog"
     ASSIGNED_LEARNING = "assigned_learning"
+    COURSE_SHELL_LOADING = "course_shell_loading"
+    SCORM_FRAME_LOADING = "scorm_frame_loading"
     COURSE_CARD = "course_card"
     COURSE_OVERVIEW = "course_overview"
     LESSON_LIST = "lesson_list"
+    LESSON_INTERACTION_GATE = "lesson_interaction_gate"
     LESSON_STATIC_TEXT = "lesson_static_text"
     LESSON_VIDEO = "lesson_video"
     LESSON_AUDIO = "lesson_audio"
     LESSON_SLIDES = "lesson_slides"
+    QUIZ_INTRO = "quiz_intro"
     QUIZ_QUESTION = "quiz_question"
+    QUIZ_RESULTS = "quiz_results"
     QUIZ_FEEDBACK = "quiz_feedback"
     COMPLETION_PAGE = "completion_page"
     CERTIFICATE_PAGE = "certificate_page"
@@ -59,11 +64,15 @@ class PageKind(StrEnum):
 class NavigationAction(StrEnum):
     REAUTH_OR_STOP = "reauth_or_stop"
     COLLECT_COURSE_CARDS = "collect_course_cards"
+    WAIT_FOR_CONTENT = "wait_for_content"
     CAPTURE_OVERVIEW_AND_START = "capture_overview_and_start"
     COLLECT_LESSONS_AND_ENTER_NEXT = "collect_lessons_and_enter_next"
+    CAPTURE_INTERACTION_GATE_AND_ADVANCE = "capture_interaction_gate_and_advance"
     CAPTURE_STATIC_SCROLL_AND_NEXT = "capture_static_scroll_and_next"
     PLAY_MEDIA_WAIT_AND_NEXT = "play_media_wait_and_next"
+    CAPTURE_QUIZ_INTRO_AND_START = "capture_quiz_intro_and_start"
     CAPTURE_QUIZ_APPLY_POLICY = "capture_quiz_apply_policy"
+    CAPTURE_QUIZ_RESULTS_AND_ADVANCE = "capture_quiz_results_and_advance"
     CAPTURE_FEEDBACK_AND_NEXT = "capture_feedback_and_next"
     CAPTURE_COMPLETION_AND_STOP = "capture_completion_and_stop"
     CAPTURE_REPORT = "capture_report"
@@ -101,12 +110,21 @@ def decide_next_action(observation: PageObservation) -> CaptureDecision:
         PageKind.AUTH_REQUIRED: (NavigationAction.REAUTH_OR_STOP, "auth_required", True),
         PageKind.CATALOG: (NavigationAction.COLLECT_COURSE_CARDS, "catalog_visible", False),
         PageKind.ASSIGNED_LEARNING: (NavigationAction.COLLECT_COURSE_CARDS, "assigned_learning_visible", False),
+        PageKind.COURSE_SHELL_LOADING: (NavigationAction.WAIT_FOR_CONTENT, "course_shell_loading", False),
+        PageKind.SCORM_FRAME_LOADING: (NavigationAction.WAIT_FOR_CONTENT, "scorm_frame_loading", False),
         PageKind.COURSE_OVERVIEW: (NavigationAction.CAPTURE_OVERVIEW_AND_START, "course_overview_visible", False),
         PageKind.LESSON_LIST: (NavigationAction.COLLECT_LESSONS_AND_ENTER_NEXT, "lesson_list_visible", False),
+        PageKind.LESSON_INTERACTION_GATE: (
+            NavigationAction.CAPTURE_INTERACTION_GATE_AND_ADVANCE,
+            "lesson_interaction_gate_visible",
+            False,
+        ),
         PageKind.LESSON_STATIC_TEXT: (NavigationAction.CAPTURE_STATIC_SCROLL_AND_NEXT, "static_lesson_visible", False),
         PageKind.LESSON_VIDEO: (NavigationAction.PLAY_MEDIA_WAIT_AND_NEXT, "video_lesson_visible", False),
         PageKind.LESSON_AUDIO: (NavigationAction.PLAY_MEDIA_WAIT_AND_NEXT, "audio_lesson_visible", False),
+        PageKind.QUIZ_INTRO: (NavigationAction.CAPTURE_QUIZ_INTRO_AND_START, "quiz_intro_visible", False),
         PageKind.QUIZ_QUESTION: (NavigationAction.CAPTURE_QUIZ_APPLY_POLICY, "quiz_question_visible", False),
+        PageKind.QUIZ_RESULTS: (NavigationAction.CAPTURE_QUIZ_RESULTS_AND_ADVANCE, "quiz_results_visible", False),
         PageKind.QUIZ_FEEDBACK: (NavigationAction.CAPTURE_FEEDBACK_AND_NEXT, "quiz_feedback_visible", False),
         PageKind.COMPLETION_PAGE: (NavigationAction.CAPTURE_COMPLETION_AND_STOP, "completion_visible", False),
         PageKind.CERTIFICATE_PAGE: (NavigationAction.CAPTURE_COMPLETION_AND_STOP, "certificate_visible", False),

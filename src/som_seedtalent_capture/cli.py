@@ -19,6 +19,7 @@ from som_seedtalent_capture.pilot_runtime import (
     run_pilot_batch_skeleton,
     run_pilot_course_skeleton,
     run_visible_catalog_discovery,
+    summarize_pilot_run,
 )
 from som_seedtalent_capture.runtime_manifest import FileSystemRuntimeManifestLoader, validate_runtime_manifest_path
 from som_seedtalent_capture.scheduler import SchedulerConfig, build_scheduler_queue, summarize_scheduler_results
@@ -282,6 +283,21 @@ def execute_course(
     )
     write_json(out, summary)
     console.print(f"Executed pilot course -> {out}")
+
+
+@pilot_app.command("summarize-run")
+def summarize_run(
+    config_path: Path = typer.Option(..., "--config"),
+    run_manifest_path: Path = typer.Option(..., "--run-manifest"),
+    out: Path = typer.Option(Path("pilot_run_digest.json"), "--out"),
+) -> None:
+    config = load_runtime_pilot_config(config_path)
+    digest = summarize_pilot_run(
+        config=config,
+        run_manifest_path=run_manifest_path,
+    )
+    write_json(out, digest)
+    console.print(f"Summarized pilot run -> {out}")
 
 
 @scheduler_app.command("dry-run")
