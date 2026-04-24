@@ -21,6 +21,8 @@ class RunnerEventType(StrEnum):
     DECISION_MADE = "decision_made"
     CLICK = "click"
     MEDIA_CONTROLLER_HANDOFF = "media_controller_handoff"
+    MEDIA_START = "media_start"
+    MEDIA_END = "media_end"
     QUIZ_CONTROLLER_HANDOFF = "quiz_controller_handoff"
     UNKNOWN_UI_STATE = "unknown_ui_state"
     RUN_COMPLETED = "run_completed"

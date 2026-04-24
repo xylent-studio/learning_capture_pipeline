@@ -13,6 +13,12 @@ from som_seedtalent_capture.autopilot.course_discovery import (
     discover_fixture_courses,
     discover_fixture_courses_from_file,
 )
+from som_seedtalent_capture.autopilot.media_controller import (
+    FixtureMediaController,
+    MediaControllerResult,
+    MediaPlaybackState,
+    inspect_media_playback_state,
+)
 from som_seedtalent_capture.autopilot.page_classifier import (
     FixtureHtmlExtractor,
     VisibleDomSnapshot,
@@ -42,6 +48,9 @@ __all__ = [
     "CourseInventoryItem",
     "DiscoveredCourseCard",
     "FixtureHtmlExtractor",
+    "FixtureMediaController",
+    "MediaControllerResult",
+    "MediaPlaybackState",
     "NavigationAction",
     "PageKind",
     "PageObservation",
@@ -59,5 +68,6 @@ __all__ = [
     "decide_next_action",
     "discover_fixture_courses",
     "discover_fixture_courses_from_file",
+    "inspect_media_playback_state",
     "run_fixture_autopilot",
 ]
