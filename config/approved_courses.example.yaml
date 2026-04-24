@@ -1,0 +1,15 @@
+account_alias: seedtalent-capture-bot
+notes: Fill this from real catalog discovery output once login is available.
+courses:
+  - course_title: Example Course One
+    source_url: https://app.seedtalent.com/courses/example-course-one
+    vendor: Example Vendor
+    summary: Example approved pilot course entry.
+    capture_priority: 1
+    estimated_duration_minutes: 30
+  - course_title: Example Course Two
+    source_url: https://app.seedtalent.com/courses/example-course-two
+    vendor: Example Vendor
+    summary: Example approved pilot course entry.
+    capture_priority: 2
+    estimated_duration_minutes: 45

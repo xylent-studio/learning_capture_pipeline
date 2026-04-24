@@ -38,10 +38,10 @@ Linux:
 
 ## Local artifacts
 
-Never commit capture artifacts. Store locally in:
+Never commit capture artifacts. Store locally outside the repo, for example:
 
 ```text
-captures/<capture_batch_id>/<capture_session_id>/
+C:\dev\_capture_artifacts\learning_capture_pipeline\<capture_batch_id>\<capture_session_id>\
 ```
 
 Expected contents:

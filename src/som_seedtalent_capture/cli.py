@@ -6,15 +6,29 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from som_seedtalent_capture.auth import PlaywrightVisibleAuthPreflight, run_auth_preflight
+from som_seedtalent_capture.config import load_pilot_course_selection, load_runtime_pilot_config, validate_runtime_pilot_paths
 from som_seedtalent_capture.models import CaptureBatch, CaptureEvent, CaptureEventType, CaptureQAReport, CaptureSession
+from som_seedtalent_capture.pilot_runtime import (
+    build_capture_plans_from_selection,
+    build_pilot_plan_bundle,
+    prepare_auth_bootstrap,
+    run_visible_catalog_discovery,
+)
+from som_seedtalent_capture.runtime_manifest import FileSystemRuntimeManifestLoader, validate_runtime_manifest_path
+from som_seedtalent_capture.scheduler import SchedulerConfig, build_scheduler_queue, summarize_scheduler_results
 
 app = typer.Typer(help="State of Mind SeedTalent authorized capture CLI scaffold.")
 batch_app = typer.Typer(help="Capture batch commands.")
 session_app = typer.Typer(help="Capture session commands.")
 qa_app = typer.Typer(help="Capture QA commands.")
+pilot_app = typer.Typer(help="Pre-login and pilot-readiness commands.")
+scheduler_app = typer.Typer(help="Scheduler skeleton commands.")
 app.add_typer(batch_app, name="batch")
 app.add_typer(session_app, name="session")
 app.add_typer(qa_app, name="qa")
+app.add_typer(pilot_app, name="pilot")
+app.add_typer(scheduler_app, name="scheduler")
 console = Console()
 
 
@@ -33,7 +47,6 @@ def create_batch(
     operator: str = typer.Option(..., "--operator", help="Capture operator name or internal ID."),
     out: Path = typer.Option(Path("capture_batch.json"), "--out", help="Output JSON path."),
 ) -> None:
-    """Create a capture batch record as JSON."""
     batch = CaptureBatch(scope_description=scope, operator=operator)
     write_json(out, batch)
     console.print(f"Created capture batch [bold]{batch.capture_batch_id}[/bold] -> {out}")
@@ -48,7 +61,6 @@ def start_session(
     jurisdiction: str | None = typer.Option(None, "--jurisdiction"),
     out: Path = typer.Option(Path("capture_session.json"), "--out"),
 ) -> None:
-    """Create a capture session record as JSON."""
     session = CaptureSession(
         capture_batch_id=capture_batch_id,
         course_title=course_title,
@@ -67,7 +79,6 @@ def add_note(
     note: str = typer.Option(..., "--note"),
     out: Path = typer.Option(Path("capture_event_note.json"), "--out"),
 ) -> None:
-    """Create an operator note event as JSON."""
     event = CaptureEvent(
         capture_session_id=capture_session_id,
         event_type=CaptureEventType.NOTE,
@@ -87,7 +98,6 @@ def qa_report(
     audio_detected: bool | None = typer.Option(None, "--audio-detected/--audio-not-detected"),
     out: Path = typer.Option(Path("qa_report.json"), "--out"),
 ) -> None:
-    """Create a basic capture QA report as JSON."""
     report = CaptureQAReport(
         capture_session_id=capture_session_id,
         screenshot_count=screenshot_count,
@@ -97,6 +107,124 @@ def qa_report(
     )
     write_json(out, report)
     console.print(f"Created QA report [bold]{report.qa_report_id}[/bold] -> {out}")
+
+
+@pilot_app.command("validate-config")
+def validate_config(
+    config_path: Path = typer.Option(..., "--config"),
+    out: Path = typer.Option(Path("runtime_config_validation.json"), "--out"),
+) -> None:
+    config = load_runtime_pilot_config(config_path)
+    repo_root = Path.cwd()
+    validation = {
+        "seedtalent_base_url": config.seedtalent_base_url,
+        "account_alias": config.account_alias,
+        "auth_mode": config.auth_mode.value,
+        **validate_runtime_pilot_paths(config, repo_root),
+    }
+    write_json(out, validation)
+    console.print(f"Validated runtime config -> {out}")
+
+
+@pilot_app.command("bootstrap-auth")
+def bootstrap_auth(
+    config_path: Path = typer.Option(..., "--config"),
+    out: Path = typer.Option(Path("auth_bootstrap.json"), "--out"),
+) -> None:
+    config = load_runtime_pilot_config(config_path)
+    preparation = prepare_auth_bootstrap(config)
+    write_json(out, preparation)
+    console.print(f"Prepared auth bootstrap paths for [bold]{config.account_alias}[/bold] -> {out}")
+
+
+@pilot_app.command("auth-preflight")
+def auth_preflight(
+    config_path: Path = typer.Option(..., "--config"),
+    out: Path = typer.Option(Path("auth_preflight.json"), "--out"),
+    headless: bool = typer.Option(True, "--headless/--headed"),
+) -> None:
+    config = load_runtime_pilot_config(config_path)
+    browser_preflight = PlaywrightVisibleAuthPreflight(
+        screenshot_dir=config.external_paths.auth_screenshot_dir,
+        authenticated_indicators=config.tuning.authenticated_indicators,
+        auth_expired_indicators=config.tuning.auth_expired_indicators,
+        prohibited_path_patterns=config.tuning.prohibited_path_patterns,
+        headless=headless,
+    )
+    result = run_auth_preflight(
+        mode=config.auth_mode,
+        storage_state_path=config.external_paths.storage_state_path,
+        base_url=config.seedtalent_base_url,
+        browser_preflight=browser_preflight,
+        repo_root=Path.cwd(),
+        account_alias=config.account_alias,
+        allowed_storage_root=config.external_paths.secret_root,
+    )
+    write_json(out, result)
+    console.print(f"Ran auth preflight for [bold]{config.account_alias}[/bold] -> {out}")
+
+
+@pilot_app.command("discovery")
+def pilot_discovery(
+    config_path: Path = typer.Option(..., "--config"),
+    out: Path = typer.Option(Path("catalog_discovery.json"), "--out"),
+    headless: bool = typer.Option(True, "--headless/--headed"),
+) -> None:
+    config = load_runtime_pilot_config(config_path)
+    manifest = FileSystemRuntimeManifestLoader().load(
+        manifest_path=config.external_paths.permission_manifest_path,
+        repo_root=Path.cwd(),
+        secret_root=config.external_paths.secret_root,
+    )
+    discovery = run_visible_catalog_discovery(config=config, manifest=manifest, headless=headless)
+    write_json(out, discovery)
+    console.print(f"Discovered catalog inventory -> {out}")
+
+
+@pilot_app.command("plans-from-approved")
+def plans_from_approved(
+    config_path: Path = typer.Option(..., "--config"),
+    out: Path = typer.Option(Path("approved_capture_plans.json"), "--out"),
+    approved_courses_path: Path | None = typer.Option(None, "--approved-courses"),
+) -> None:
+    config = load_runtime_pilot_config(config_path)
+    selection_path = approved_courses_path or config.external_paths.approved_courses_path
+    manifest = FileSystemRuntimeManifestLoader().load(
+        manifest_path=config.external_paths.permission_manifest_path,
+        repo_root=Path.cwd(),
+        secret_root=config.external_paths.secret_root,
+    )
+    selection = load_pilot_course_selection(selection_path)
+    plans = build_capture_plans_from_selection(selection=selection, config=config, manifest=manifest)
+    write_json(out, build_pilot_plan_bundle(selection=selection, config=config, plans=plans))
+    console.print(f"Built capture plans from approved courses -> {out}")
+
+
+@scheduler_app.command("dry-run")
+def scheduler_dry_run(
+    config_path: Path = typer.Option(..., "--config"),
+    out: Path = typer.Option(Path("scheduler_summary.json"), "--out"),
+    approved_courses_path: Path | None = typer.Option(None, "--approved-courses"),
+) -> None:
+    config = load_runtime_pilot_config(config_path)
+    selection_path = approved_courses_path or config.external_paths.approved_courses_path
+    manifest_path = validate_runtime_manifest_path(config.external_paths.permission_manifest_path, Path.cwd())
+    selection = load_pilot_course_selection(selection_path)
+    manifest = FileSystemRuntimeManifestLoader().load(
+        manifest_path=manifest_path,
+        repo_root=Path.cwd(),
+        secret_root=config.external_paths.secret_root,
+    )
+    plans = build_capture_plans_from_selection(selection=selection, config=config, manifest=manifest)
+    queue = build_scheduler_queue(plans, SchedulerConfig(rate_limit_delay_seconds=config.tuning.screenshot_interval_seconds))
+    summary = summarize_scheduler_results(
+        queue=queue,
+        qa_results=[],
+        auth_failure_reasons=[],
+        config=SchedulerConfig(rate_limit_delay_seconds=config.tuning.screenshot_interval_seconds),
+    )
+    write_json(out, summary)
+    console.print(f"Built scheduler dry-run summary -> {out}")
 
 
 if __name__ == "__main__":

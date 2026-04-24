@@ -44,6 +44,24 @@ def test_manual_storage_state_path_can_live_outside_repo(tmp_path: Path):
     assert status is None
 
 
+def test_manual_storage_state_path_must_live_under_allowed_root(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    allowed_root = tmp_path / "approved-secrets"
+    allowed_root.mkdir()
+    storage_state_path = tmp_path / "other-secrets" / "storage_state.json"
+    storage_state_path.parent.mkdir(parents=True)
+    storage_state_path.write_text('{"cookies": []}', encoding="utf-8")
+
+    status = validate_manual_storage_state_path(
+        storage_state_path,
+        repo_root,
+        allowed_root=allowed_root,
+    )
+
+    assert status == AuthPreflightStatus.PROHIBITED_PATH
+
+
 def test_run_auth_preflight_returns_authenticated_for_visible_logged_in_state(tmp_path: Path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
@@ -125,6 +143,34 @@ def test_run_auth_preflight_returns_prohibited_path_from_browser_observation(tmp
 
     assert result.status == AuthPreflightStatus.PROHIBITED_PATH
     assert result.prohibited_path_detected is True
+
+
+def test_run_auth_preflight_rejects_storage_state_outside_allowed_root(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    allowed_root = tmp_path / "approved-secrets"
+    allowed_root.mkdir()
+    storage_state_path = tmp_path / "outside-secrets" / "storage_state.json"
+    storage_state_path.parent.mkdir(parents=True)
+    storage_state_path.write_text('{"cookies": []}', encoding="utf-8")
+    fake_preflight = FakeBrowserAuthPreflight(
+        BrowserPreflightObservation(
+            authenticated=True,
+            current_url="https://app.seedtalent.com/dashboard",
+        )
+    )
+
+    result = run_auth_preflight(
+        mode=AuthMode.MANUAL_STORAGE_STATE,
+        storage_state_path=storage_state_path,
+        base_url="https://app.seedtalent.com",
+        browser_preflight=fake_preflight,
+        repo_root=repo_root,
+        allowed_storage_root=allowed_root,
+    )
+
+    assert result.status == AuthPreflightStatus.PROHIBITED_PATH
+    assert result.error_reason == "storage_state_not_allowed"
 
 
 def test_run_auth_preflight_fails_for_unsupported_mode(tmp_path: Path):

@@ -1,0 +1,38 @@
+seedtalent_base_url: https://app.seedtalent.com
+account_alias: seedtalent-capture-bot
+auth_mode: manual_storage_state
+
+external_paths:
+  secret_root: C:\dev\_secrets\learning-capture-pipeline
+  permission_manifest_path: C:\dev\_secrets\learning-capture-pipeline\manifests\permission_manifest.yaml
+  storage_state_path: C:\dev\_secrets\learning-capture-pipeline\playwright\storage-state.json
+  auth_screenshot_dir: C:\dev\_capture_artifacts\learning_capture_pipeline\preflight
+  artifact_root: C:\dev\_capture_artifacts\learning_capture_pipeline
+  approved_courses_path: C:\dev\_secrets\learning-capture-pipeline\inputs\approved_courses.yaml
+
+tuning:
+  visible_locator_preferences:
+    - role
+    - label
+    - visible_text
+    - semantic_heading
+  prohibited_path_patterns:
+    - /settings
+    - /billing
+    - /account
+    - /messages
+    - /support
+  authenticated_indicators:
+    - Assigned Learning
+    - Catalog
+    - Course Overview
+    - Lesson List
+  auth_expired_indicators:
+    - Sign in
+    - Log in
+    - Login
+    - Session expired
+  screenshot_interval_seconds: 5
+  navigation_timeout_ms: 15000
+  unchanged_screen_timeout_ms: 10000
+  max_click_retries: 2
