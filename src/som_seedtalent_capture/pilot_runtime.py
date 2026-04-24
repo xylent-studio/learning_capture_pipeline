@@ -22,11 +22,15 @@ from som_seedtalent_capture.models import new_id
 from som_seedtalent_capture.permissions import PermissionManifest, authorize_capture
 from som_seedtalent_capture.pilot_manifests import (
     BatchRunCounts,
+    FailureCategory,
     FailureBundle,
     FailureStage,
+    LiveFindingsDigest,
     PilotBatchManifest,
     PilotBatchStatus,
     PilotBatchSummary,
+    PilotExecutionAttempt,
+    PilotRunDigest,
     PilotRunManifest,
     PilotRunStatus,
     PilotRunSummary,
@@ -95,11 +99,17 @@ def _diagnostics_snapshot_from_preflight(result: AuthPreflightResult, config: Ru
     if result.error_reason:
         notes.append(result.error_reason)
     return RunDiagnosticsSnapshot(
+        outer_page_url=result.current_url,
+        outer_page_title=None,
+        active_capture_surface_type="page",
+        active_capture_surface_name=None,
+        active_capture_surface_url=result.current_url,
         current_url=result.current_url,
         visible_state_summary=result.visible_state_summary,
         screenshot_uri=result.screenshot_uri,
         prohibited_path_detected=result.prohibited_path_detected,
         prohibited_path_hits=hits,
+        failure_category=FailureCategory.AUTH_REQUIRED if result.status == AuthPreflightStatus.AUTH_EXPIRED else None,
         notes=notes,
     )
 
@@ -111,6 +121,11 @@ def _diagnostics_snapshot_from_run_result(result: AutopilotRunResult, config: Ru
     hits = [pattern for pattern in config.tuning.prohibited_path_patterns if current_url and pattern in current_url]
     notes = [note for note in [result.stopped_reason] if note]
     return RunDiagnosticsSnapshot(
+        outer_page_url=latest_snapshot.outer_page_url if latest_snapshot else current_url,
+        outer_page_title=latest_snapshot.outer_page_title if latest_snapshot else None,
+        active_capture_surface_type=latest_snapshot.active_capture_surface_type if latest_snapshot else None,
+        active_capture_surface_name=latest_snapshot.active_capture_surface_name if latest_snapshot else None,
+        active_capture_surface_url=latest_snapshot.active_capture_surface_url if latest_snapshot else current_url,
         current_url=current_url,
         page_title=latest_snapshot.title if latest_snapshot else None,
         visible_state_summary=(latest_snapshot.visible_text[:500] if latest_snapshot else None),
@@ -122,15 +137,82 @@ def _diagnostics_snapshot_from_run_result(result: AutopilotRunResult, config: Ru
         visible_links=latest_snapshot.links[:12] if latest_snapshot else [],
         classifier_page_kind=latest_observation.page_kind.value if latest_observation else None,
         classifier_confidence=latest_observation.confidence if latest_observation else None,
+        failure_category=result.failure_category,
         notes=notes,
     )
 
 
-def _suggest_next_action(result: AuthPreflightResult) -> str:
-    if result.status == AuthPreflightStatus.AUTH_EXPIRED:
+def _outputs_root(config: RuntimePilotConfig) -> Path:
+    return config.external_paths.secret_root / "outputs"
+
+
+def _live_findings_digest_path(config: RuntimePilotConfig) -> Path:
+    return _outputs_root(config) / "live-findings-digest.json"
+
+
+def _summarize_capture_surface(snapshot: RunDiagnosticsSnapshot | None) -> str | None:
+    if snapshot is None:
+        return None
+    if snapshot.active_capture_surface_type == "frame" and snapshot.active_capture_surface_name:
+        return f"frame:{snapshot.active_capture_surface_name}"
+    if snapshot.current_url and "scormcontent" in snapshot.current_url:
+        return f"frame:{snapshot.current_url}"
+    if snapshot.active_capture_surface_type is None and snapshot.current_url and "scormcontent" in snapshot.current_url:
+        return f"frame:{snapshot.current_url}"
+    if snapshot.active_capture_surface_type is None:
+        return None
+    surface_identity = snapshot.active_capture_surface_name or snapshot.active_capture_surface_url or snapshot.current_url
+    return f"{snapshot.active_capture_surface_type}:{surface_identity}" if surface_identity else snapshot.active_capture_surface_type
+
+
+def _derive_blocker_category(run_manifest: PilotRunManifest) -> FailureCategory | None:
+    if run_manifest.current_blocker_category is not None:
+        return run_manifest.current_blocker_category
+
+    snapshot = run_manifest.diagnostics_snapshot
+    if snapshot is None:
+        return None
+
+    headings = {heading.lower() for heading in snapshot.visible_headings}
+    buttons = {button.lower() for button in snapshot.visible_buttons}
+    if "quiz results" in headings or ("next" in buttons and "take again" in buttons):
+        return FailureCategory.QUIZ_RESULTS_EXIT_UNHANDLED
+    if snapshot.classifier_page_kind == PageKind.LESSON_INTERACTION_GATE.value:
+        return FailureCategory.LESSON_GATE_UNHANDLED
+    if snapshot.classifier_page_kind == PageKind.SCORM_FRAME_LOADING.value:
+        return FailureCategory.SCORM_FRAME_NOT_READY
+    if snapshot.classifier_page_kind == PageKind.COURSE_SHELL_LOADING.value:
+        return FailureCategory.SHELL_READY_BUT_FRAME_LOADING
+    return None
+
+
+def _suggest_next_action(
+    *,
+    preflight_result: AuthPreflightResult | None = None,
+    diagnostics_snapshot: RunDiagnosticsSnapshot | None = None,
+    failure_category: FailureCategory | None = None,
+    stop_reason: str | None = None,
+) -> str:
+    if preflight_result is not None and preflight_result.status == AuthPreflightStatus.AUTH_EXPIRED:
         return "Refresh the headed browser session and save a new external storage-state file."
-    if result.status == AuthPreflightStatus.PROHIBITED_PATH:
+    if preflight_result is not None and preflight_result.status == AuthPreflightStatus.PROHIBITED_PATH:
         return "Return to the approved SeedTalent training scope before retrying the pilot."
+    if failure_category == FailureCategory.SHELL_READY_BUT_FRAME_LOADING:
+        return "Inspect the SCORM launch timing and keep the runner focused on the visible content frame before retrying."
+    if failure_category == FailureCategory.SCORM_FRAME_NOT_READY:
+        return "Tune frame-ready waits against the SCORM content surface before rerunning this course."
+    if failure_category == FailureCategory.LESSON_GATE_UNHANDLED:
+        return "Inspect the latest gate screenshot and extend visible interaction handling for that lesson gate."
+    if failure_category == FailureCategory.QUIZ_RESULTS_EXIT_UNHANDLED:
+        return "Inspect the quiz-results screenshot and prefer visible NEXT or CONTINUE controls over TAKE AGAIN or SKIP."
+    if failure_category == FailureCategory.SELECTOR_PRIORITY_MISFIRE:
+        return "Adjust live selector priority so visible progression controls outrank SKIP-style controls."
+    if failure_category == FailureCategory.REPEATED_SAME_STATE:
+        return "Inspect the latest repeated-state screenshots and add a state-specific progression rule for that visible UI."
+    if diagnostics_snapshot is not None and diagnostics_snapshot.prohibited_path_detected:
+        return "Return to the approved SeedTalent training scope before retrying the pilot."
+    if stop_reason:
+        return f"Inspect the latest diagnostics bundle for stop_reason={stop_reason} before retrying."
     return "Validate the external storage-state path and rerun auth preflight."
 
 
@@ -177,6 +259,70 @@ def _failure_bundle_path(layout: RunArtifactLayout) -> Path:
 
 def _preflight_result_path(layout: RunArtifactLayout) -> Path:
     return Path(layout.preflight_dir) / "auth-preflight.json"
+
+
+def build_run_digest(run_manifest: PilotRunManifest) -> PilotRunDigest:
+    blocker_category = _derive_blocker_category(run_manifest)
+    evidence_paths = [
+        path
+        for path in [
+            run_manifest.run_manifest_path,
+            run_manifest.diagnostics_snapshot_path,
+            run_manifest.failure_bundle_path,
+            run_manifest.qa_report_path,
+            *run_manifest.screenshot_uris[-3:],
+        ]
+        if path
+    ]
+    return PilotRunDigest(
+        run_manifest_path=str(Path(run_manifest.run_manifest_path or _run_manifest_path(run_manifest.artifact_layout)).resolve()),
+        lifecycle_status=run_manifest.lifecycle_status,
+        attempt_count=len(run_manifest.attempts),
+        stop_reason=run_manifest.runner_stop_reason,
+        last_observed_page_kind=(run_manifest.observed_page_kinds[-1] if run_manifest.observed_page_kinds else None),
+        active_capture_surface=_summarize_capture_surface(run_manifest.diagnostics_snapshot),
+        current_blocker_category=blocker_category,
+        recommended_next_action=run_manifest.recommended_next_action
+        or _suggest_next_action(
+            diagnostics_snapshot=run_manifest.diagnostics_snapshot,
+            failure_category=blocker_category,
+            stop_reason=run_manifest.runner_stop_reason,
+        ),
+        evidence_paths=evidence_paths,
+    )
+
+
+def _validated_findings_for_manifest(run_manifest: PilotRunManifest) -> list[str]:
+    blocker_category = _derive_blocker_category(run_manifest)
+    findings = [
+        "Auth sampled too early can look expired until the visible dashboard or course shell stabilizes.",
+        "Outer shell readiness is different from visible SCORM content readiness.",
+        "Course content is usually inside the visible SCORM frame, not the outer SeedTalent shell.",
+        "Lesson interaction gates can block progression and may require clicking the visible label wrapper for checkboxes.",
+        "Quiz flow contains intro, question, results, and exit states.",
+        "Hidden or low-value skip controls should not outrank visible progression controls.",
+    ]
+    if blocker_category == FailureCategory.QUIZ_RESULTS_EXIT_UNHANDLED:
+        findings.append("Current highest-value live blocker is the quiz-results exit transition after the visible score/results state.")
+    return findings
+
+
+def write_live_findings_digest(*, config: RuntimePilotConfig, run_manifest: PilotRunManifest) -> Path:
+    blocker_category = _derive_blocker_category(run_manifest)
+    digest = LiveFindingsDigest(
+        course_title=run_manifest.course_title,
+        run_manifest_path=str(Path(run_manifest.run_manifest_path or _run_manifest_path(run_manifest.artifact_layout)).resolve()),
+        current_blocker_category=blocker_category,
+        stop_reason=run_manifest.runner_stop_reason,
+        active_capture_surface=_summarize_capture_surface(run_manifest.diagnostics_snapshot),
+        last_observed_page_kind=(run_manifest.observed_page_kinds[-1] if run_manifest.observed_page_kinds else None),
+        evidence_paths=build_run_digest(run_manifest).evidence_paths,
+        validated_findings=_validated_findings_for_manifest(run_manifest),
+    )
+    target = _live_findings_digest_path(config)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    write_model_json(target, digest)
+    return target
 
 
 def _build_run_manifest(
@@ -275,12 +421,18 @@ def _write_failure_bundle(
         source_url=run_manifest.source_url,
         current_status=run_manifest.lifecycle_status,
         failure_stage=stage,
+        failure_category=run_manifest.current_blocker_category or (diagnostics_snapshot.failure_category if diagnostics_snapshot else None),
         error_type=error_type,
         error_message=error_message,
         auth_preflight_result=auth_preflight_result.model_dump(mode="json") if auth_preflight_result is not None else None,
         prohibited_path_hits=diagnostics_snapshot.prohibited_path_hits if diagnostics_snapshot else [],
         diagnostics_snapshot=diagnostics_snapshot,
-        suggested_next_action=_suggest_next_action(auth_preflight_result) if auth_preflight_result is not None else "Inspect the diagnostics snapshot and retry safely.",
+        suggested_next_action=_suggest_next_action(
+            preflight_result=auth_preflight_result,
+            diagnostics_snapshot=diagnostics_snapshot,
+            failure_category=run_manifest.current_blocker_category or (diagnostics_snapshot.failure_category if diagnostics_snapshot else None),
+            stop_reason=run_manifest.runner_stop_reason,
+        ),
     )
     path = _failure_bundle_path(run_manifest.artifact_layout)
     write_model_json(path, bundle)
@@ -322,6 +474,19 @@ def _update_run_manifest_from_execution(
 
     unique_screenshots = list(dict.fromkeys(snapshot.screenshot_uri for snapshot in run_result.page_snapshots))
     duration_ms = max((event.timestamp_ms for event in run_result.events), default=0)
+    attempt = PilotExecutionAttempt(
+        attempt_number=len(run_manifest.attempts) + 1,
+        lifecycle_status=PilotRunStatus.COMPLETED if run_result.completion_detected else PilotRunStatus.NEEDS_RECAPTURE,
+        stop_reason=run_result.stopped_reason,
+        failure_category=run_result.failure_category,
+        diagnostics_snapshot_path=run_manifest.diagnostics_snapshot_path,
+        key_screenshot_uris=unique_screenshots[-3:],
+    )
+    recommended_next_action = _suggest_next_action(
+        diagnostics_snapshot=diagnostics_snapshot,
+        failure_category=run_result.failure_category,
+        stop_reason=run_result.stopped_reason,
+    )
 
     return run_manifest.model_copy(
         update={
@@ -336,6 +501,9 @@ def _update_run_manifest_from_execution(
             "unknown_ui_state_detected": run_result.unknown_ui_state_detected,
             "runner_stop_reason": run_result.stopped_reason,
             "diagnostics_snapshot": diagnostics_snapshot,
+            "current_blocker_category": run_result.failure_category,
+            "recommended_next_action": recommended_next_action,
+            "attempts": [*run_manifest.attempts, attempt],
         },
         deep=True,
     )
@@ -450,6 +618,17 @@ def _extract_visible_course_cards(page: Page) -> list[dict[str, str | None]]:
 
 def load_pilot_plan_bundle(path: str | Path) -> PilotPlanBundle:
     return read_model_json(path, PilotPlanBundle)  # type: ignore[return-value]
+
+
+def summarize_pilot_run(
+    *,
+    config: RuntimePilotConfig,
+    run_manifest_path: str | Path,
+) -> PilotRunDigest:
+    run_manifest = read_model_json(run_manifest_path, PilotRunManifest)  # type: ignore[assignment]
+    run_manifest = run_manifest.model_copy(update={"run_manifest_path": str(Path(run_manifest_path).resolve())}, deep=True)
+    write_live_findings_digest(config=config, run_manifest=run_manifest)
+    return build_run_digest(run_manifest)
 
 
 def run_visible_catalog_discovery(
@@ -658,6 +837,12 @@ def run_pilot_course_skeleton(
             "preflight_error_reason": preflight_result.error_reason,
             "diagnostics_snapshot_path": str(diagnostics_path.resolve()),
             "diagnostics_snapshot": diagnostics_snapshot,
+            "current_blocker_category": diagnostics_snapshot.failure_category,
+            "recommended_next_action": _suggest_next_action(
+                preflight_result=preflight_result,
+                diagnostics_snapshot=diagnostics_snapshot,
+                failure_category=diagnostics_snapshot.failure_category,
+            ),
         },
         deep=True,
     )
@@ -742,6 +927,12 @@ def execute_pilot_course(
             "preflight_error_reason": preflight_result.error_reason,
             "diagnostics_snapshot_path": str(diagnostics_path.resolve()),
             "diagnostics_snapshot": diagnostics_snapshot,
+            "current_blocker_category": diagnostics_snapshot.failure_category,
+            "recommended_next_action": _suggest_next_action(
+                preflight_result=preflight_result,
+                diagnostics_snapshot=diagnostics_snapshot,
+                failure_category=diagnostics_snapshot.failure_category,
+            ),
         },
         deep=True,
     )
@@ -755,7 +946,23 @@ def execute_pilot_course(
     qa_result: AutopilotQAResult
 
     if preflight_result.status != AuthPreflightStatus.AUTHENTICATED:
-        run_manifest = run_manifest.model_copy(update={"lifecycle_status": PilotRunStatus.PREFLIGHT_FAILED}, deep=True)
+        run_manifest = run_manifest.model_copy(
+            update={
+                "lifecycle_status": PilotRunStatus.PREFLIGHT_FAILED,
+                "attempts": [
+                    *run_manifest.attempts,
+                    PilotExecutionAttempt(
+                        attempt_number=len(run_manifest.attempts) + 1,
+                        lifecycle_status=PilotRunStatus.PREFLIGHT_FAILED,
+                        stop_reason=preflight_result.status.value,
+                        failure_category=diagnostics_snapshot.failure_category,
+                        diagnostics_snapshot_path=str(diagnostics_path.resolve()),
+                        key_screenshot_uris=[preflight_result.screenshot_uri] if preflight_result.screenshot_uri else [],
+                    ),
+                ],
+            },
+            deep=True,
+        )
         _write_processing_manifest(run_manifest)
         _write_failure_bundle(
             run_manifest=run_manifest,
@@ -821,6 +1028,23 @@ def execute_pilot_course(
                     "runner_executed": True,
                     "lifecycle_status": PilotRunStatus.NEEDS_RECAPTURE,
                     "runner_stop_reason": exc.__class__.__name__,
+                    "current_blocker_category": FailureCategory.EXECUTION_ERROR,
+                    "recommended_next_action": _suggest_next_action(
+                        diagnostics_snapshot=diagnostics_snapshot,
+                        failure_category=FailureCategory.EXECUTION_ERROR,
+                        stop_reason=exc.__class__.__name__,
+                    ),
+                    "attempts": [
+                        *run_manifest.attempts,
+                        PilotExecutionAttempt(
+                            attempt_number=len(run_manifest.attempts) + 1,
+                            lifecycle_status=PilotRunStatus.NEEDS_RECAPTURE,
+                            stop_reason=exc.__class__.__name__,
+                            failure_category=FailureCategory.EXECUTION_ERROR,
+                            diagnostics_snapshot_path=str(diagnostics_path.resolve()),
+                            key_screenshot_uris=run_manifest.screenshot_uris[-3:],
+                        ),
+                    ],
                 },
                 deep=True,
             )
@@ -838,6 +1062,7 @@ def execute_pilot_course(
             qa_result = _write_qa_report(run_manifest)
 
     write_model_json(_run_manifest_path(run_manifest.artifact_layout), run_manifest)
+    write_live_findings_digest(config=config, run_manifest=run_manifest)
     batch_run_manifests = _collect_batch_run_manifests(batch_manifest, run_manifest)
     batch_status = (
         PilotBatchStatus.COMPLETED

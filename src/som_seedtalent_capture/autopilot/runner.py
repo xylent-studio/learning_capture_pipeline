@@ -4,16 +4,34 @@ import re
 from enum import StrEnum
 from pathlib import Path
 from time import perf_counter
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Error, Page, sync_playwright
 from pydantic import BaseModel, Field
 
 from som_seedtalent_capture.autopilot.capture_plan import CapturePlan
 from som_seedtalent_capture.autopilot.page_classifier import VisibleDomSnapshot, classify_fixture_page, classify_visible_page
 from som_seedtalent_capture.autopilot.recorder import RecorderProvider, RecorderSession, RecorderStartRequest
 from som_seedtalent_capture.autopilot.state_machine import CaptureDecision, NavigationAction, PageKind, PageObservation, decide_next_action
+from som_seedtalent_capture.pilot_manifests import FailureCategory
+
+_LIVE_PAGE_WAIT_TIMEOUT_MS = 15000
+_LIVE_PAGE_WAIT_POLL_MS = 500
+_REPEATED_STATE_THRESHOLD = 3
+_LOADING_TOKENS = (
+    "loading",
+    "please wait",
+    "just a moment",
+    "fetching",
+    "preparing",
+)
+_APP_SHELL_TOKENS = (
+    "dashboard",
+    "course library",
+    "reports",
+    "logout",
+)
 
 
 class RunnerEventType(StrEnum):
@@ -46,6 +64,11 @@ class RunnerEvent(BaseModel):
 class RunnerPageSnapshot(BaseModel):
     execution_url: str
     logical_url: str | None = None
+    outer_page_url: str | None = None
+    outer_page_title: str | None = None
+    active_capture_surface_type: str | None = None
+    active_capture_surface_name: str | None = None
+    active_capture_surface_url: str | None = None
     title: str | None = None
     visible_text: str = ""
     headings: list[str] = Field(default_factory=list)
@@ -80,6 +103,8 @@ class AutopilotRunResult(BaseModel):
     completion_detected: bool = False
     unknown_ui_state_detected: bool = False
     stopped_reason: str | None = None
+    failure_category: FailureCategory | None = None
+    active_capture_surface: str | None = None
 
 
 class FixtureMediaController(Protocol):
@@ -135,17 +160,19 @@ def _build_logical_url_map(plan: CapturePlan, start_url_override: str | None = N
     return {_basename_from_url(url): url for url in logical_urls}
 
 
-def _extract_visible_snapshot(page: Page) -> VisibleDomSnapshot:
-    visible_text = page.locator("body").inner_text()
-    headings = [text.strip() for text in page.locator("h1:visible, h2:visible, h3:visible").all_inner_texts() if text.strip()]
-    buttons = [text.strip() for text in page.locator("button:visible").all_inner_texts() if text.strip()]
-    links = [text.strip() for text in page.locator("a:visible").all_inner_texts() if text.strip()]
-    media_state = page.evaluate(
+def _extract_visible_snapshot(surface: Any) -> VisibleDomSnapshot:
+    visible_text = surface.locator("body").inner_text()
+    headings = [text.strip() for text in surface.locator("h1:visible, h2:visible, h3:visible").all_inner_texts() if text.strip()]
+    buttons = [text.strip() for text in surface.locator("button:visible").all_inner_texts() if text.strip()]
+    links = [text.strip() for text in surface.locator("a:visible").all_inner_texts() if text.strip()]
+    media_state = surface.evaluate(
         """() => {
             const media = document.querySelector('video, audio');
             return {
+              title: document.title || null,
               dataPageKind: document.body?.dataset?.pageKind ?? null,
               count: document.querySelectorAll('video, audio').length,
+              progressbarCount: document.querySelectorAll('[role="progressbar"]').length,
               durationSeconds: media && Number.isFinite(media.duration) ? media.duration : null,
               currentTimeSeconds: media && Number.isFinite(media.currentTime) ? media.currentTime : null,
               paused: media ? media.paused : null,
@@ -154,19 +181,107 @@ def _extract_visible_snapshot(page: Page) -> VisibleDomSnapshot:
     )
 
     return VisibleDomSnapshot(
-        title=page.title(),
-        data_page_kind=media_state["dataPageKind"],
+        title=media_state.get("title"),
+        data_page_kind=media_state.get("dataPageKind"),
         visible_text=visible_text,
         headings=headings,
         buttons=buttons,
         links=links,
         media={
-            "count": media_state["count"],
-            "duration_seconds": media_state["durationSeconds"],
-            "current_time_seconds": media_state["currentTimeSeconds"],
-            "paused": media_state["paused"],
+            "count": media_state.get("count", 0),
+            "duration_seconds": media_state.get("durationSeconds"),
+            "current_time_seconds": media_state.get("currentTimeSeconds"),
+            "paused": media_state.get("paused"),
         },
     )
+
+
+def _extract_visible_snapshot_with_retry(surface: Any, *, page: Page, retries: int = 3) -> VisibleDomSnapshot:
+    for attempt in range(retries):
+        try:
+            return _extract_visible_snapshot(surface)
+        except Error as exc:
+            if "Execution context was destroyed" not in str(exc) and "Frame was detached" not in str(exc):
+                raise
+            if attempt == retries - 1:
+                raise
+            page.wait_for_timeout(_LIVE_PAGE_WAIT_POLL_MS)
+    return _extract_visible_snapshot(surface)
+
+
+def _snapshot_has_meaningful_content(snapshot: VisibleDomSnapshot) -> bool:
+    haystack = " ".join(
+        [
+            snapshot.title or "",
+            snapshot.visible_text,
+            " ".join(snapshot.headings),
+            " ".join(snapshot.buttons),
+            " ".join(snapshot.links),
+        ]
+    ).strip()
+    haystack_lower = haystack.lower()
+
+    if snapshot.headings or snapshot.buttons or snapshot.links or snapshot.media.count > 0:
+        return True
+
+    if len(haystack) < 24:
+        return False
+
+    return not any(token in haystack_lower for token in _LOADING_TOKENS)
+
+
+def _snapshot_looks_like_app_shell(snapshot: VisibleDomSnapshot) -> bool:
+    haystack_lower = " ".join(
+        [
+            snapshot.title or "",
+            snapshot.visible_text,
+            " ".join(snapshot.headings),
+            " ".join(snapshot.buttons),
+            " ".join(snapshot.links),
+        ]
+    ).lower()
+    return all(token in haystack_lower for token in _APP_SHELL_TOKENS)
+
+
+def _select_live_capture_surface(page: Page) -> Any:
+    preferred_frames = []
+    for frame in getattr(page, "frames", []):
+        frame_url = getattr(frame, "url", "") or ""
+        frame_name = getattr(frame, "name", "") or ""
+        if "scormcontent" in frame_url or frame_name == "scormdriver_content":
+            preferred_frames.append(frame)
+
+    if preferred_frames:
+        return preferred_frames[0]
+    return page
+
+
+def _surface_metadata(page: Page, surface: Any) -> tuple[str, str | None, str | None]:
+    if surface is page:
+        return "page", None, page.url
+    surface_name = getattr(surface, "name", None)
+    surface_url = getattr(surface, "url", None)
+    return "frame", surface_name or None, surface_url or None
+
+
+def _wait_for_live_page_ready(page: Page, *, timeout_ms: int = _LIVE_PAGE_WAIT_TIMEOUT_MS) -> Any:
+    elapsed_ms = 0
+    while elapsed_ms < timeout_ms:
+        surface = _select_live_capture_surface(page)
+        try:
+            snapshot = _extract_visible_snapshot_with_retry(surface, page=page)
+        except Error:
+            page.wait_for_timeout(_LIVE_PAGE_WAIT_POLL_MS)
+            elapsed_ms += _LIVE_PAGE_WAIT_POLL_MS
+            continue
+        if surface is not page:
+            if _snapshot_has_meaningful_content(snapshot):
+                return surface
+        elif _snapshot_has_meaningful_content(snapshot) and not _snapshot_looks_like_app_shell(snapshot):
+            return surface
+        page.wait_for_timeout(_LIVE_PAGE_WAIT_POLL_MS)
+        elapsed_ms += _LIVE_PAGE_WAIT_POLL_MS
+    return _select_live_capture_surface(page)
 
 
 def _capture_page(
@@ -176,14 +291,23 @@ def _capture_page(
     screenshot_dir: Path,
     logical_url: str | None,
     classifier=classify_fixture_page,
+    capture_surface: Any | None = None,
 ) -> tuple[RunnerPageSnapshot, PageObservation]:
     screenshot_uri = str((screenshot_dir / f"step-{step_index:03d}.png").resolve())
     page.screenshot(path=screenshot_uri, full_page=True)
-    snapshot = _extract_visible_snapshot(page)
-    observation = classifier(url=page.url, snapshot=snapshot, screenshot_uri=screenshot_uri)
+    observed_surface = capture_surface or page
+    snapshot = _extract_visible_snapshot_with_retry(observed_surface, page=page)
+    observed_url = getattr(observed_surface, "url", page.url)
+    observation = classifier(url=observed_url, snapshot=snapshot, screenshot_uri=screenshot_uri)
+    capture_surface_type, capture_surface_name, capture_surface_url = _surface_metadata(page, observed_surface)
     runner_snapshot = RunnerPageSnapshot(
-        execution_url=page.url,
+        execution_url=observed_url,
         logical_url=logical_url,
+        outer_page_url=page.url,
+        outer_page_title=page.title(),
+        active_capture_surface_type=capture_surface_type,
+        active_capture_surface_name=capture_surface_name,
+        active_capture_surface_url=capture_surface_url,
         title=snapshot.title,
         visible_text=snapshot.visible_text,
         headings=snapshot.headings,
@@ -201,6 +325,18 @@ def _record_page_visit(result: AutopilotRunResult, execution_url: str, logical_u
         result.visited_execution_urls.append(execution_url)
     if logical_url and logical_url not in result.visited_logical_urls:
         result.visited_logical_urls.append(logical_url)
+
+
+def _state_signature(snapshot: RunnerPageSnapshot, observation: PageObservation) -> str:
+    visible_text = " ".join(snapshot.visible_text.lower().split())
+    return "|".join(
+        [
+            observation.page_kind.value,
+            visible_text[:200],
+            ",".join(button.lower() for button in snapshot.buttons[:8]),
+            ",".join(link.lower() for link in snapshot.links[:8]),
+        ]
+    )
 
 
 def _record_decision(result: AutopilotRunResult, observation: PageObservation, decision: CaptureDecision, logical_url: str | None) -> None:
@@ -227,18 +363,50 @@ def _find_next_lesson_basename(plan: CapturePlan, result: AutopilotRunResult) ->
 def _click_and_wait(page: Page, locator, timeout_ms: int = 5000) -> str:
     label = locator.inner_text().strip()
     locator.click()
-    page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+    except Exception:
+        page.wait_for_timeout(min(timeout_ms, 1000))
+    else:
+        page.wait_for_timeout(1000)
     return label
 
 
-def _click_candidate(page: Page, labels: list[str], timeout_ms: int = 5000) -> str | None:
+def _click_candidate(surface: Any, page: Page, labels: list[str], timeout_ms: int = 5000) -> str | None:
     for label in labels:
-        button = page.get_by_role("button", name=re.compile(label, re.IGNORECASE)).first
+        pattern = re.compile(label, re.IGNORECASE)
+        button = surface.get_by_role("button", name=pattern).first
         if button.count() > 0:
             return _click_and_wait(page, button, timeout_ms=timeout_ms)
-        link = page.get_by_role("link", name=re.compile(label, re.IGNORECASE)).first
+        link = surface.get_by_role("link", name=pattern).first
         if link.count() > 0:
             return _click_and_wait(page, link, timeout_ms=timeout_ms)
+        visible_button = surface.locator("button:visible").filter(has_text=pattern).first
+        if visible_button.count() > 0:
+            return _click_and_wait(page, visible_button, timeout_ms=timeout_ms)
+        visible_link = surface.locator("a:visible").filter(has_text=pattern).first
+        if visible_link.count() > 0:
+            return _click_and_wait(page, visible_link, timeout_ms=timeout_ms)
+    return None
+
+
+def _complete_visible_checklist(surface: Any, page: Page) -> str | None:
+    checkboxes = surface.locator("input[type='checkbox']:visible")
+    if checkboxes.count() == 0:
+        return None
+
+    checked_any = False
+    for index in range(checkboxes.count()):
+        checkbox = checkboxes.nth(index)
+        if checkbox.is_checked():
+            continue
+        checkbox.locator("xpath=ancestor::label[1]").click(force=True)
+        checked_any = True
+        page.wait_for_timeout(250)
+
+    if checked_any:
+        page.wait_for_timeout(1000)
+        return "complete visible checklist"
     return None
 
 
@@ -270,29 +438,53 @@ def _apply_direct_navigation(*, page: Page, observation: PageObservation, plan: 
     return None
 
 
-def _apply_live_navigation(*, page: Page, observation: PageObservation, plan: CapturePlan, result: AutopilotRunResult) -> str | None:
+def _apply_live_navigation(*, page: Page, surface: Any, observation: PageObservation, plan: CapturePlan, result: AutopilotRunResult) -> str | None:
     if observation.page_kind in {PageKind.CATALOG, PageKind.ASSIGNED_LEARNING}:
         target_basename = _basename_from_url(plan.source_url)
         locator = page.locator(f"a[href*='{target_basename}']").first
         if locator.count() > 0:
             return _click_and_wait(page, locator)
-        return _click_candidate(page, [plan.course_title, "open course", "launch", "view course"])
+        return _click_candidate(page, page, [plan.course_title, "open course", "launch", "view course"])
 
     if observation.page_kind == PageKind.COURSE_OVERVIEW:
-        return _click_candidate(page, ["start course", "begin", "resume", "launch", "continue", "open course"])
+        return _click_candidate(surface, page, ["start quiz", "start course", "^start$", "begin", "resume", "launch", "continue", "open course"])
 
     if observation.page_kind == PageKind.LESSON_LIST:
+        checklist_action = _complete_visible_checklist(surface, page)
+        if checklist_action:
+            return checklist_action
         for lesson_url in plan.lesson_urls:
             if lesson_url in result.visited_logical_urls:
                 continue
             lesson_basename = _basename_from_url(lesson_url)
-            locator = page.locator(f"a[href*='{lesson_basename}']").first
+            locator = surface.locator(f"a[href*='{lesson_basename}']").first
             if locator.count() > 0:
                 return _click_and_wait(page, locator)
-        return _click_candidate(page, ["lesson", "module", "unit", "continue", "next"])
+        return _click_candidate(surface, page, ["start quiz", "continue", "next", "^start$", "start course"])
+
+    if observation.page_kind == PageKind.LESSON_INTERACTION_GATE:
+        checklist_action = _complete_visible_checklist(surface, page)
+        if checklist_action:
+            return checklist_action
+        return _click_candidate(surface, page, ["continue", "next", "complete", "finish"])
 
     if observation.page_kind in {PageKind.LESSON_STATIC_TEXT, PageKind.QUIZ_FEEDBACK, PageKind.REPORT_TABLE}:
-        return _click_candidate(page, ["next", "continue", "complete", "finish", "return to catalog"])
+        checklist_action = _complete_visible_checklist(surface, page)
+        if checklist_action:
+            return checklist_action
+        return _click_candidate(surface, page, ["start quiz", "next", "continue", "complete", "finish", "return to catalog"])
+
+    if observation.page_kind == PageKind.QUIZ_INTRO:
+        return _click_candidate(surface, page, ["start quiz", "^start$", "begin quiz"])
+
+    if observation.page_kind == PageKind.QUIZ_QUESTION:
+        checklist_action = _complete_visible_checklist(surface, page)
+        if checklist_action:
+            return checklist_action
+        return _click_candidate(surface, page, ["submit", "next", "continue"])
+
+    if observation.page_kind == PageKind.QUIZ_RESULTS:
+        return _click_candidate(surface, page, ["next", "continue", "finish", "complete", "return to catalog"])
 
     return None
 
@@ -582,6 +774,8 @@ def run_visible_session_autopilot(
     )
 
     start = perf_counter()
+    repeated_signature: str | None = None
+    repeated_count = 0
     result.events.append(
         RunnerEvent(
             event_type=RunnerEventType.RUN_STARTED,
@@ -618,6 +812,7 @@ def run_visible_session_autopilot(
             page.goto(plan.source_url, wait_until="domcontentloaded")
 
             for step_index in range(max_steps):
+                capture_surface = _wait_for_live_page_ready(page)
                 execution_basename = _basename_from_url(page.url)
                 logical_url = logical_url_map.get(execution_basename, page.url)
 
@@ -627,10 +822,14 @@ def run_visible_session_autopilot(
                     screenshot_dir=screenshot_dir,
                     logical_url=logical_url,
                     classifier=classify_visible_page,
+                    capture_surface=capture_surface,
                 )
                 result.page_snapshots.append(snapshot)
                 result.observations.append(observation)
                 _record_page_visit(result, page.url, logical_url)
+                result.active_capture_surface = (
+                    f"{snapshot.active_capture_surface_type}:{snapshot.active_capture_surface_name or snapshot.active_capture_surface_url or snapshot.execution_url}"
+                )
 
                 timestamp_ms = _timestamp_ms(start)
                 result.events.extend(
@@ -654,6 +853,30 @@ def run_visible_session_autopilot(
                     ]
                 )
 
+                signature = _state_signature(snapshot, observation)
+                if signature == repeated_signature:
+                    repeated_count += 1
+                else:
+                    repeated_signature = signature
+                    repeated_count = 1
+
+                if repeated_count >= _REPEATED_STATE_THRESHOLD:
+                    result.unknown_ui_state_detected = True
+                    result.failure_category = FailureCategory.REPEATED_SAME_STATE
+                    result.stopped_reason = "repeated_same_state"
+                    result.events.append(
+                        RunnerEvent(
+                            event_type=RunnerEventType.RUN_STOPPED,
+                            timestamp_ms=timestamp_ms,
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            detail=result.stopped_reason,
+                            screenshot_uri=snapshot.screenshot_uri,
+                        )
+                    )
+                    break
+
                 decision = decide_next_action(observation)
                 _record_decision(result, observation, decision, logical_url)
                 result.events.append(
@@ -669,10 +892,45 @@ def run_visible_session_autopilot(
 
                 if observation.page_kind in {PageKind.AUTH_REQUIRED, PageKind.UNKNOWN}:
                     result.unknown_ui_state_detected = True
+                    result.failure_category = (
+                        FailureCategory.AUTH_REQUIRED if observation.page_kind == PageKind.AUTH_REQUIRED else FailureCategory.UNKNOWN_UI_STATE
+                    )
                     result.stopped_reason = "auth_required" if observation.page_kind == PageKind.AUTH_REQUIRED else "unknown_ui_state"
                     result.events.append(
                         RunnerEvent(
                             event_type=RunnerEventType.UNKNOWN_UI_STATE,
+                            timestamp_ms=timestamp_ms,
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            detail=result.stopped_reason,
+                            screenshot_uri=snapshot.screenshot_uri,
+                        )
+                    )
+                    break
+
+                if observation.page_kind == PageKind.COURSE_SHELL_LOADING:
+                    result.failure_category = FailureCategory.SHELL_READY_BUT_FRAME_LOADING
+                    result.stopped_reason = "course_shell_loading"
+                    result.events.append(
+                        RunnerEvent(
+                            event_type=RunnerEventType.RUN_STOPPED,
+                            timestamp_ms=timestamp_ms,
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            detail=result.stopped_reason,
+                            screenshot_uri=snapshot.screenshot_uri,
+                        )
+                    )
+                    break
+
+                if observation.page_kind == PageKind.SCORM_FRAME_LOADING:
+                    result.failure_category = FailureCategory.SCORM_FRAME_NOT_READY
+                    result.stopped_reason = "scorm_frame_loading"
+                    result.events.append(
+                        RunnerEvent(
+                            event_type=RunnerEventType.RUN_STOPPED,
                             timestamp_ms=timestamp_ms,
                             execution_url=page.url,
                             logical_url=logical_url,
@@ -698,7 +956,13 @@ def run_visible_session_autopilot(
                     )
                     break
 
-                clicked_label = _apply_live_navigation(page=page, observation=observation, plan=plan, result=result)
+                clicked_label = _apply_live_navigation(
+                    page=page,
+                    surface=capture_surface,
+                    observation=observation,
+                    plan=plan,
+                    result=result,
+                )
                 if clicked_label:
                     result.events.append(
                         RunnerEvent(
@@ -712,7 +976,21 @@ def run_visible_session_autopilot(
                     )
                     continue
 
-                result.stopped_reason = "no_live_navigation_available"
+                if observation.page_kind == PageKind.LESSON_INTERACTION_GATE:
+                    result.failure_category = FailureCategory.LESSON_GATE_UNHANDLED
+                    result.stopped_reason = "lesson_gate_unhandled"
+                elif observation.page_kind == PageKind.QUIZ_RESULTS:
+                    result.failure_category = FailureCategory.QUIZ_RESULTS_EXIT_UNHANDLED
+                    result.stopped_reason = "quiz_results_exit_unhandled"
+                elif any(button.strip().lower() == "skip to lesson" for button in snapshot.buttons) and any(
+                    button.strip().lower() in {"next", "continue", "submit"} for button in snapshot.buttons
+                ):
+                    result.failure_category = FailureCategory.SELECTOR_PRIORITY_MISFIRE
+                    result.stopped_reason = "selector_priority_misfire"
+                else:
+                    result.failure_category = FailureCategory.NO_LIVE_NAVIGATION_AVAILABLE
+                    result.stopped_reason = "no_live_navigation_available"
+
                 result.events.append(
                     RunnerEvent(
                         event_type=RunnerEventType.RUN_STOPPED,
@@ -726,6 +1004,7 @@ def run_visible_session_autopilot(
                 )
                 break
             else:
+                result.failure_category = FailureCategory.REPEATED_SAME_STATE
                 result.stopped_reason = "max_steps_exceeded"
                 result.events.append(
                     RunnerEvent(

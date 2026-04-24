@@ -407,3 +407,41 @@ def test_pilot_execute_course_completes_on_stubbed_runner(monkeypatch: pytest.Mo
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["status"] == "completed"
     assert payload["qa_readiness_status"] == "ready_for_reconstruction"
+
+
+def test_pilot_summarize_run_writes_digest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    config_path = _write_runtime_config(tmp_path)
+    plan_bundle_path = _write_plan_bundle(tmp_path, config_path)
+    setup_out = tmp_path / "run-summary.json"
+    preflight_path = tmp_path / "artifacts" / "preflight" / "auth-preflight.png"
+    preflight_path.parent.mkdir(parents=True, exist_ok=True)
+    preflight_path.write_text("preflight", encoding="utf-8")
+    monkeypatch.setattr(
+        "som_seedtalent_capture.pilot_runtime.run_auth_preflight",
+        lambda **kwargs: AuthPreflightResult(
+            mode=AuthMode.MANUAL_STORAGE_STATE,
+            status=AuthPreflightStatus.AUTHENTICATED,
+            checked_base_url=kwargs["base_url"],
+            storage_state_path=str(kwargs["storage_state_path"]),
+            account_alias=kwargs["account_alias"],
+            current_url="https://app.seedtalent.com/catalog",
+            screenshot_uri=str(preflight_path),
+        ),
+    )
+    setup_result = runner.invoke(
+        app,
+        ["pilot", "run-course", "--config", str(config_path), "--plan-bundle", str(plan_bundle_path), "--out", str(setup_out)],
+    )
+    assert setup_result.exit_code == 0
+    run_manifest_path = json.loads(setup_out.read_text(encoding="utf-8"))["run_manifest_path"]
+
+    out = tmp_path / "run-digest.json"
+    result = runner.invoke(
+        app,
+        ["pilot", "summarize-run", "--config", str(config_path), "--run-manifest", str(run_manifest_path), "--out", str(out)],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["attempt_count"] == 0
+    assert payload["lifecycle_status"] == "ready_for_live_capture"

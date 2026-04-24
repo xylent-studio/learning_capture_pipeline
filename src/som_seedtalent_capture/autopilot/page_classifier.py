@@ -198,6 +198,30 @@ def classify_visible_page(
 
     if any(token in haystack for token in {"sign in", "log in", "login", "session expired"}):
         page_kind, confidence = PageKind.AUTH_REQUIRED, 0.96
+    elif "dashboard" in haystack and any(token in haystack for token in {"course library", "reports", "logout"}) and not any(
+        token in haystack for token in {"lesson", "quiz", "course overview", "start course"}
+    ):
+        page_kind, confidence = PageKind.COURSE_SHELL_LOADING, 0.82
+    elif any(token in haystack for token in {"loading", "please wait", "launching course", "preparing course"}) and "dashboard" not in haystack:
+        page_kind, confidence = PageKind.SCORM_FRAME_LOADING, 0.84
+    elif any(token in haystack for token in {"read and select each box to move on", "complete the content above before moving on"}):
+        page_kind, confidence = PageKind.LESSON_INTERACTION_GATE, 0.91
+    elif any(token in haystack for token in {"quiz results", "your score", "you scored", "score:"}) and any(
+        token in haystack for token in {"next", "take again", "continue"}
+    ):
+        page_kind, confidence = PageKind.QUIZ_RESULTS, 0.94
+    elif any(token in haystack for token in {"start quiz", "begin quiz"}) and not any(
+        token in haystack for token in {"question", "submit", "quiz results"}
+    ):
+        page_kind, confidence = PageKind.QUIZ_INTRO, 0.9
+    elif "submit" in haystack and (any(token in haystack for token in {"quiz", "question", "knowledge check", "assessment"}) or "/quiz/" in url):
+        page_kind, confidence = PageKind.QUIZ_QUESTION, 0.9
+    elif "by the end of this course" in haystack or ("lessons must be completed in order" in haystack and "start" in haystack):
+        page_kind, confidence = PageKind.COURSE_OVERVIEW, 0.88
+    elif any(token in haystack for token in {"skip to lesson", "lesson 1 of", "% complete"}) and any(
+        token in haystack for token in {"continue", "home", "lesson"}
+    ):
+        page_kind, confidence = PageKind.LESSON_LIST, 0.85
     elif "assigned learning" in haystack:
         page_kind, confidence = PageKind.ASSIGNED_LEARNING, 0.92
     elif "catalog" in haystack and ("course" in haystack or snapshot.links):
@@ -210,8 +234,6 @@ def classify_visible_page(
         page_kind, confidence = PageKind.LESSON_AUDIO, 0.82
     elif snapshot.media.count > 0 or any("video" in token.lower() for token in [snapshot.title or "", *snapshot.headings, *snapshot.buttons]):
         page_kind, confidence = PageKind.LESSON_VIDEO, 0.82
-    elif "submit" in haystack and any(token in haystack for token in {"quiz", "question", "knowledge check", "assessment"}):
-        page_kind, confidence = PageKind.QUIZ_QUESTION, 0.82
     elif any(token in haystack for token in {"correct", "incorrect", "feedback"}) and "continue" in haystack:
         page_kind, confidence = PageKind.QUIZ_FEEDBACK, 0.8
     elif any(token in haystack for token in {"completion", "completed", "certificate"}):

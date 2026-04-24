@@ -41,7 +41,26 @@ class FailureStage(StrEnum):
     RECONSTRUCTION = "reconstruction"
 
 
+class FailureCategory(StrEnum):
+    AUTH_REQUIRED = "auth_required"
+    SHELL_READY_BUT_FRAME_LOADING = "shell_ready_but_frame_loading"
+    SCORM_FRAME_NOT_READY = "scorm_frame_not_ready"
+    LESSON_GATE_UNHANDLED = "lesson_gate_unhandled"
+    QUIZ_RESULTS_EXIT_UNHANDLED = "quiz_results_exit_unhandled"
+    SELECTOR_PRIORITY_MISFIRE = "selector_priority_misfire"
+    REPEATED_SAME_STATE = "repeated_same_state"
+    UNKNOWN_UI_STATE = "unknown_ui_state"
+    NO_LIVE_NAVIGATION_AVAILABLE = "no_live_navigation_available"
+    PREFLIGHT_BLOCKED = "preflight_blocked"
+    EXECUTION_ERROR = "execution_error"
+
+
 class RunDiagnosticsSnapshot(BaseModel):
+    outer_page_url: str | None = None
+    outer_page_title: str | None = None
+    active_capture_surface_type: str | None = None
+    active_capture_surface_name: str | None = None
+    active_capture_surface_url: str | None = None
     current_url: str | None = None
     page_title: str | None = None
     visible_state_summary: str | None = None
@@ -53,7 +72,18 @@ class RunDiagnosticsSnapshot(BaseModel):
     visible_links: list[str] = Field(default_factory=list)
     classifier_page_kind: str | None = None
     classifier_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    failure_category: FailureCategory | None = None
     notes: list[str] = Field(default_factory=list)
+
+
+class PilotExecutionAttempt(BaseModel):
+    attempt_number: int = Field(ge=1)
+    timestamp: datetime = Field(default_factory=_now_utc)
+    lifecycle_status: PilotRunStatus
+    stop_reason: str | None = None
+    failure_category: FailureCategory | None = None
+    diagnostics_snapshot_path: str | None = None
+    key_screenshot_uris: list[str] = Field(default_factory=list)
 
 
 class BatchRunCounts(BaseModel):
@@ -102,6 +132,8 @@ class PilotRunManifest(BaseModel):
     preflight_error_reason: str | None = None
     diagnostics_snapshot_path: str | None = None
     diagnostics_snapshot: RunDiagnosticsSnapshot | None = None
+    current_blocker_category: FailureCategory | None = None
+    recommended_next_action: str | None = None
     qa_report_path: str | None = None
     processing_manifest_path: str | None = None
     reconstruction_summary_path: str | None = None
@@ -116,6 +148,7 @@ class PilotRunManifest(BaseModel):
     completion_detected: bool = False
     unknown_ui_state_detected: bool = False
     runner_stop_reason: str | None = None
+    attempts: list[PilotExecutionAttempt] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=_now_utc)
     updated_at: datetime = Field(default_factory=_now_utc)
 
@@ -128,6 +161,7 @@ class FailureBundle(BaseModel):
     source_url: str
     current_status: PilotRunStatus
     failure_stage: FailureStage
+    failure_category: FailureCategory | None = None
     error_type: str | None = None
     error_message: str | None = None
     auth_preflight_result: dict[str, object] | None = None
@@ -150,6 +184,34 @@ class PilotBatchSummary(BaseModel):
     status: PilotBatchStatus
     counts: BatchRunCounts
     run_manifest_paths: list[str] = Field(default_factory=list)
+
+
+class PilotRunDigest(BaseModel):
+    run_manifest_path: str
+    lifecycle_status: PilotRunStatus
+    attempt_count: int = Field(ge=0)
+    stop_reason: str | None = None
+    last_observed_page_kind: str | None = None
+    active_capture_surface: str | None = None
+    current_blocker_category: FailureCategory | None = None
+    recommended_next_action: str | None = None
+    evidence_paths: list[str] = Field(default_factory=list)
+
+
+class LiveFindingsDigest(BaseModel):
+    owner: str = "runtime"
+    source_of_truth: str = "generated_from_run_manifest_and_latest_live_execution"
+    refresh_trigger: str = "pilot execute-course or pilot summarize-run"
+    maintenance_mode: str = "generated"
+    last_validated_at: datetime = Field(default_factory=_now_utc)
+    course_title: str
+    run_manifest_path: str
+    current_blocker_category: FailureCategory | None = None
+    stop_reason: str | None = None
+    active_capture_surface: str | None = None
+    last_observed_page_kind: str | None = None
+    evidence_paths: list[str] = Field(default_factory=list)
+    validated_findings: list[str] = Field(default_factory=list)
 
 
 def write_model_json(path: str | Path, model: BaseModel | dict[str, object]) -> Path:

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from som_seedtalent_capture.autopilot.page_classifier import FixtureHtmlExtractor, classify_fixture_page
+from som_seedtalent_capture.autopilot.page_classifier import VisibleDomSnapshot, FixtureHtmlExtractor, classify_fixture_page, classify_visible_page
 from som_seedtalent_capture.autopilot.state_machine import PageKind
 
 
@@ -88,3 +88,128 @@ def test_classify_completion_fixture():
 
     assert observation.page_kind == PageKind.COMPLETION_PAGE
     assert "Back to Catalog" in observation.buttons
+
+
+def test_classify_live_scorm_course_overview():
+    snapshot = VisibleDomSnapshot(
+        title="Seed Talent",
+        visible_text=(
+            "Seed & Strain | NY START Introducing the high-quality, value-driven cannabis Seed & Strain. "
+            "By the end of this course, you will be able to identify the target consumers. "
+            "Who is Seed & Strain? Flower This lesson is currently unavailable Lessons must be completed in order"
+        ),
+        links=["START", "Who is Seed & Strain?"],
+    )
+
+    observation = classify_visible_page(
+        url="https://cdn.example/scormcontent/index.html#/preview",
+        snapshot=snapshot,
+    )
+
+    assert observation.page_kind == PageKind.COURSE_OVERVIEW
+
+
+def test_classify_live_scorm_lesson_list():
+    snapshot = VisibleDomSnapshot(
+        title="Seed Talent",
+        visible_text=(
+            "SKIP TO LESSON Seed & Strain | NY 0% COMPLETE Home Who is Seed & Strain? "
+            "LESSON 1 OF 4 CONTINUE 20% Completed Lessons must be completed in order"
+        ),
+        buttons=["SKIP TO LESSON", "CONTINUE"],
+        links=["Seed & Strain | NY", "Who is Seed & Strain?", "Home"],
+    )
+
+    observation = classify_visible_page(
+        url="https://cdn.example/scormcontent/index.html#/lessons/example",
+        snapshot=snapshot,
+    )
+
+    assert observation.page_kind == PageKind.LESSON_LIST
+
+
+def test_classify_live_scorm_checkbox_gate_as_static_lesson():
+    snapshot = VisibleDomSnapshot(
+        title="Seed Talent",
+        visible_text=(
+            "Read and select each box to move on. "
+            "Seed & Strain strives to bring unique and exciting strains to the market. "
+            "Complete the content above before moving on."
+        ),
+    )
+
+    observation = classify_visible_page(
+        url="https://cdn.example/scormcontent/index.html#/lessons/example",
+        snapshot=snapshot,
+    )
+
+    assert observation.page_kind == PageKind.LESSON_INTERACTION_GATE
+
+
+def test_classify_live_submit_page_as_quiz_question():
+    snapshot = VisibleDomSnapshot(
+        title="Seed Talent",
+        visible_text="The highest THC % Submit",
+        buttons=["Submit"],
+    )
+
+    observation = classify_visible_page(
+        url="https://cdn.example/scormcontent/index.html#/quiz/example",
+        snapshot=snapshot,
+    )
+
+    assert observation.page_kind == PageKind.QUIZ_QUESTION
+
+
+def test_classify_live_quiz_intro():
+    snapshot = VisibleDomSnapshot(
+        title="Seed Talent",
+        visible_text="Knowledge Check Start Quiz",
+        buttons=["Start Quiz"],
+    )
+
+    observation = classify_visible_page(
+        url="https://cdn.example/scormcontent/index.html#/quiz/example",
+        snapshot=snapshot,
+    )
+
+    assert observation.page_kind == PageKind.QUIZ_INTRO
+
+
+def test_classify_live_quiz_results():
+    snapshot = VisibleDomSnapshot(
+        title="Seed Talent",
+        visible_text="Quiz Results You scored 50% and did not pass. Next Take Again",
+        buttons=["NEXT", "TAKE AGAIN"],
+        headings=["Quiz Results"],
+    )
+
+    observation = classify_visible_page(
+        url="https://cdn.example/scormcontent/index.html#/quiz/example",
+        snapshot=snapshot,
+    )
+
+    assert observation.page_kind == PageKind.QUIZ_RESULTS
+
+
+def test_classify_shell_loading_vs_scorm_loading():
+    shell_snapshot = VisibleDomSnapshot(
+        title="Seed Talent",
+        visible_text="Dashboard Course Library Reports Logout",
+    )
+    frame_snapshot = VisibleDomSnapshot(
+        title="Seed Talent",
+        visible_text="Launching course please wait",
+    )
+
+    shell_observation = classify_visible_page(
+        url="https://app.seedtalent.com/catalog",
+        snapshot=shell_snapshot,
+    )
+    frame_observation = classify_visible_page(
+        url="https://cdn.example/scormcontent/index.html#/loading",
+        snapshot=frame_snapshot,
+    )
+
+    assert shell_observation.page_kind == PageKind.COURSE_SHELL_LOADING
+    assert frame_observation.page_kind == PageKind.SCORM_FRAME_LOADING
