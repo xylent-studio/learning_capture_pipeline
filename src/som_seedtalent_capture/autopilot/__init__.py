@@ -28,6 +28,14 @@ from som_seedtalent_capture.autopilot.quiz_controller import (
     FixtureQuizController,
     QuizCaptureResult,
 )
+from som_seedtalent_capture.autopilot.recorder import (
+    FFmpegRecorderProvider,
+    FakeRecorderProvider,
+    ObsRecorderProvider,
+    RecorderSession,
+    RecorderSessionStatus,
+    RecorderStartRequest,
+)
 from som_seedtalent_capture.autopilot.runner import (
     AutopilotRunResult,
     RunnerDecisionRecord,
@@ -61,12 +69,18 @@ __all__ = [
     "QaThresholds",
     "QuizCaptureMode",
     "QuizCaptureResult",
+    "RecorderSession",
+    "RecorderSessionStatus",
+    "RecorderStartRequest",
     "RecorderProfile",
     "RunnerDecisionRecord",
     "RunnerEvent",
     "RunnerEventType",
     "RunnerPageSnapshot",
     "VisibleDomSnapshot",
+    "FFmpegRecorderProvider",
+    "FakeRecorderProvider",
+    "ObsRecorderProvider",
     "build_fixture_capture_plan",
     "build_fixture_capture_plan_from_file",
     "classify_fixture_page",

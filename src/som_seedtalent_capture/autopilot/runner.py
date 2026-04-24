@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from som_seedtalent_capture.autopilot.capture_plan import CapturePlan
 from som_seedtalent_capture.autopilot.page_classifier import VisibleDomSnapshot, classify_fixture_page
+from som_seedtalent_capture.autopilot.recorder import RecorderProvider, RecorderSession, RecorderStartRequest
 from som_seedtalent_capture.autopilot.state_machine import CaptureDecision, NavigationAction, PageKind, PageObservation, decide_next_action
 
 
@@ -20,6 +21,8 @@ class RunnerEventType(StrEnum):
     SCREENSHOT_CAPTURED = "screenshot_captured"
     DECISION_MADE = "decision_made"
     CLICK = "click"
+    RECORDER_START = "recorder_start"
+    RECORDER_STOP = "recorder_stop"
     MEDIA_CONTROLLER_HANDOFF = "media_controller_handoff"
     MEDIA_START = "media_start"
     MEDIA_END = "media_end"
@@ -65,6 +68,7 @@ class AutopilotRunResult(BaseModel):
     course_title: str
     planned_source_url: str
     artifact_root: str
+    recorder_session: RecorderSession | None = None
     page_snapshots: list[RunnerPageSnapshot] = Field(default_factory=list)
     observations: list[PageObservation] = Field(default_factory=list)
     decisions: list[RunnerDecisionRecord] = Field(default_factory=list)
@@ -259,6 +263,7 @@ def run_fixture_autopilot(
     max_steps: int = 20,
     media_controller: FixtureMediaController | None = None,
     quiz_controller: FixtureQuizController | None = None,
+    recorder_provider: RecorderProvider | None = None,
 ) -> AutopilotRunResult:
     fixture_root_path = Path(fixture_root).resolve()
     artifact_root_path = Path(artifact_root).resolve()
@@ -282,200 +287,230 @@ def run_fixture_autopilot(
         )
     )
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=headless)
-        page = browser.new_page()
-        execution_url = _resolve_execution_url(start_url_override or plan.source_url, fixture_root_path)
-        page.goto(execution_url, wait_until="domcontentloaded")
-
-        for step_index in range(max_steps):
-            execution_basename = _basename_from_url(page.url)
-            logical_url = logical_url_map.get(execution_basename)
-
-            snapshot, observation = _capture_page(
-                page=page,
-                step_index=step_index,
-                screenshot_dir=screenshot_dir,
-                logical_url=logical_url,
+    recorder_session: RecorderSession | None = None
+    if recorder_provider is not None:
+        recorder_session = recorder_provider.start(
+            RecorderStartRequest(
+                artifact_root=str(artifact_root_path),
+                course_title=plan.course_title,
+                recorder_profile=plan.recorder_profile,
             )
-            result.page_snapshots.append(snapshot)
-            result.observations.append(observation)
-            _record_page_visit(result, page.url, logical_url)
-
-            timestamp_ms = _timestamp_ms(start)
-            result.events.extend(
-                [
-                    RunnerEvent(
-                        event_type=RunnerEventType.PAGE_LOAD,
-                        timestamp_ms=timestamp_ms,
-                        execution_url=page.url,
-                        logical_url=logical_url,
-                        page_kind=observation.page_kind,
-                        detail=observation.title or observation.page_kind.value,
-                    ),
-                    RunnerEvent(
-                        event_type=RunnerEventType.SCREENSHOT_CAPTURED,
-                        timestamp_ms=timestamp_ms,
-                        execution_url=page.url,
-                        logical_url=logical_url,
-                        page_kind=observation.page_kind,
-                        screenshot_uri=snapshot.screenshot_uri,
-                    ),
-                ]
+        )
+        result.recorder_session = recorder_session
+        result.events.append(
+            RunnerEvent(
+                event_type=RunnerEventType.RECORDER_START,
+                timestamp_ms=_timestamp_ms(start),
+                logical_url=start_url_override or plan.source_url,
+                detail=recorder_session.provider_name,
             )
+        )
 
-            decision = decide_next_action(observation)
-            _record_decision(result, observation, decision, logical_url)
-            result.events.append(
-                RunnerEvent(
-                    event_type=RunnerEventType.DECISION_MADE,
-                    timestamp_ms=timestamp_ms,
-                    execution_url=page.url,
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=headless)
+            page = browser.new_page()
+            execution_url = _resolve_execution_url(start_url_override or plan.source_url, fixture_root_path)
+            page.goto(execution_url, wait_until="domcontentloaded")
+
+            for step_index in range(max_steps):
+                execution_basename = _basename_from_url(page.url)
+                logical_url = logical_url_map.get(execution_basename)
+
+                snapshot, observation = _capture_page(
+                    page=page,
+                    step_index=step_index,
+                    screenshot_dir=screenshot_dir,
                     logical_url=logical_url,
-                    page_kind=observation.page_kind,
-                    detail=f"{decision.action.value}:{decision.reason}",
                 )
-            )
+                result.page_snapshots.append(snapshot)
+                result.observations.append(observation)
+                _record_page_visit(result, page.url, logical_url)
 
-            if observation.page_kind == PageKind.COMPLETION_PAGE:
-                result.completion_detected = True
+                timestamp_ms = _timestamp_ms(start)
+                result.events.extend(
+                    [
+                        RunnerEvent(
+                            event_type=RunnerEventType.PAGE_LOAD,
+                            timestamp_ms=timestamp_ms,
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            detail=observation.title or observation.page_kind.value,
+                        ),
+                        RunnerEvent(
+                            event_type=RunnerEventType.SCREENSHOT_CAPTURED,
+                            timestamp_ms=timestamp_ms,
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            screenshot_uri=snapshot.screenshot_uri,
+                        ),
+                    ]
+                )
+
+                decision = decide_next_action(observation)
+                _record_decision(result, observation, decision, logical_url)
                 result.events.append(
                     RunnerEvent(
-                        event_type=RunnerEventType.RUN_COMPLETED,
+                        event_type=RunnerEventType.DECISION_MADE,
                         timestamp_ms=timestamp_ms,
                         execution_url=page.url,
                         logical_url=logical_url,
                         page_kind=observation.page_kind,
-                        detail="completion_detected",
+                        detail=f"{decision.action.value}:{decision.reason}",
+                    )
+                )
+
+                if observation.page_kind == PageKind.COMPLETION_PAGE:
+                    result.completion_detected = True
+                    result.events.append(
+                        RunnerEvent(
+                            event_type=RunnerEventType.RUN_COMPLETED,
+                            timestamp_ms=timestamp_ms,
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            detail="completion_detected",
+                        )
+                    )
+                    break
+
+                if observation.page_kind in {PageKind.LESSON_VIDEO, PageKind.LESSON_AUDIO}:
+                    if media_controller is None:
+                        result.stopped_reason = "media_controller_required"
+                        result.events.append(
+                            RunnerEvent(
+                                event_type=RunnerEventType.RUN_STOPPED,
+                                timestamp_ms=timestamp_ms,
+                                execution_url=page.url,
+                                logical_url=logical_url,
+                                page_kind=observation.page_kind,
+                                detail=result.stopped_reason,
+                            )
+                        )
+                        break
+
+                    result.events.append(
+                        RunnerEvent(
+                            event_type=RunnerEventType.MEDIA_CONTROLLER_HANDOFF,
+                            timestamp_ms=timestamp_ms,
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            detail="delegate_media_page",
+                        )
+                    )
+                    result.events.extend(
+                        media_controller.handle(
+                            page=page,
+                            observation=observation,
+                            screenshot_dir=screenshot_dir,
+                            logical_url=logical_url,
+                            timestamp_ms=timestamp_ms,
+                        )
+                    )
+                    page.wait_for_load_state("domcontentloaded")
+                    continue
+
+                if observation.page_kind == PageKind.QUIZ_QUESTION:
+                    if quiz_controller is None:
+                        result.stopped_reason = "quiz_controller_required"
+                        result.events.append(
+                            RunnerEvent(
+                                event_type=RunnerEventType.RUN_STOPPED,
+                                timestamp_ms=timestamp_ms,
+                                execution_url=page.url,
+                                logical_url=logical_url,
+                                page_kind=observation.page_kind,
+                                detail=result.stopped_reason,
+                            )
+                        )
+                        break
+
+                    result.events.append(
+                        RunnerEvent(
+                            event_type=RunnerEventType.QUIZ_CONTROLLER_HANDOFF,
+                            timestamp_ms=timestamp_ms,
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            detail="delegate_quiz_page",
+                        )
+                    )
+                    result.events.extend(
+                        quiz_controller.handle(
+                            page=page,
+                            observation=observation,
+                            screenshot_dir=screenshot_dir,
+                            logical_url=logical_url,
+                            timestamp_ms=timestamp_ms,
+                        )
+                    )
+                    page.wait_for_load_state("domcontentloaded")
+                    continue
+
+                clicked_label = _apply_direct_navigation(page=page, observation=observation, plan=plan, result=result)
+                if clicked_label:
+                    result.events.append(
+                        RunnerEvent(
+                            event_type=RunnerEventType.CLICK,
+                            timestamp_ms=_timestamp_ms(start),
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            detail=clicked_label,
+                        )
+                    )
+                    continue
+
+                if observation.page_kind == PageKind.UNKNOWN:
+                    result.unknown_ui_state_detected = True
+                    result.stopped_reason = "unknown_ui_state"
+                    result.events.append(
+                        RunnerEvent(
+                            event_type=RunnerEventType.UNKNOWN_UI_STATE,
+                            timestamp_ms=timestamp_ms,
+                            execution_url=page.url,
+                            logical_url=logical_url,
+                            page_kind=observation.page_kind,
+                            detail="unknown_page_kind",
+                        )
+                    )
+                    break
+
+                result.stopped_reason = "no_direct_navigation_available"
+                result.events.append(
+                    RunnerEvent(
+                        event_type=RunnerEventType.RUN_STOPPED,
+                        timestamp_ms=timestamp_ms,
+                        execution_url=page.url,
+                        logical_url=logical_url,
+                        page_kind=observation.page_kind,
+                        detail=result.stopped_reason,
                     )
                 )
                 break
-
-            if observation.page_kind in {PageKind.LESSON_VIDEO, PageKind.LESSON_AUDIO}:
-                if media_controller is None:
-                    result.stopped_reason = "media_controller_required"
-                    result.events.append(
-                        RunnerEvent(
-                            event_type=RunnerEventType.RUN_STOPPED,
-                            timestamp_ms=timestamp_ms,
-                            execution_url=page.url,
-                            logical_url=logical_url,
-                            page_kind=observation.page_kind,
-                            detail=result.stopped_reason,
-                        )
-                    )
-                    break
-
+            else:
+                result.stopped_reason = "max_steps_exceeded"
                 result.events.append(
                     RunnerEvent(
-                        event_type=RunnerEventType.MEDIA_CONTROLLER_HANDOFF,
-                        timestamp_ms=timestamp_ms,
-                        execution_url=page.url,
-                        logical_url=logical_url,
-                        page_kind=observation.page_kind,
-                        detail="delegate_media_page",
-                    )
-                )
-                result.events.extend(
-                    media_controller.handle(
-                        page=page,
-                        observation=observation,
-                        screenshot_dir=screenshot_dir,
-                        logical_url=logical_url,
-                        timestamp_ms=timestamp_ms,
-                    )
-                )
-                page.wait_for_load_state("domcontentloaded")
-                continue
-
-            if observation.page_kind == PageKind.QUIZ_QUESTION:
-                if quiz_controller is None:
-                    result.stopped_reason = "quiz_controller_required"
-                    result.events.append(
-                        RunnerEvent(
-                            event_type=RunnerEventType.RUN_STOPPED,
-                            timestamp_ms=timestamp_ms,
-                            execution_url=page.url,
-                            logical_url=logical_url,
-                            page_kind=observation.page_kind,
-                            detail=result.stopped_reason,
-                        )
-                    )
-                    break
-
-                result.events.append(
-                    RunnerEvent(
-                        event_type=RunnerEventType.QUIZ_CONTROLLER_HANDOFF,
-                        timestamp_ms=timestamp_ms,
-                        execution_url=page.url,
-                        logical_url=logical_url,
-                        page_kind=observation.page_kind,
-                        detail="delegate_quiz_page",
-                    )
-                )
-                result.events.extend(
-                    quiz_controller.handle(
-                        page=page,
-                        observation=observation,
-                        screenshot_dir=screenshot_dir,
-                        logical_url=logical_url,
-                        timestamp_ms=timestamp_ms,
-                    )
-                )
-                page.wait_for_load_state("domcontentloaded")
-                continue
-
-            clicked_label = _apply_direct_navigation(page=page, observation=observation, plan=plan, result=result)
-            if clicked_label:
-                result.events.append(
-                    RunnerEvent(
-                        event_type=RunnerEventType.CLICK,
+                        event_type=RunnerEventType.RUN_STOPPED,
                         timestamp_ms=_timestamp_ms(start),
-                        execution_url=page.url,
-                        logical_url=logical_url,
-                        page_kind=observation.page_kind,
-                        detail=clicked_label,
+                        detail=result.stopped_reason,
                     )
                 )
-                continue
-
-            if observation.page_kind == PageKind.UNKNOWN:
-                result.unknown_ui_state_detected = True
-                result.stopped_reason = "unknown_ui_state"
-                result.events.append(
-                    RunnerEvent(
-                        event_type=RunnerEventType.UNKNOWN_UI_STATE,
-                        timestamp_ms=timestamp_ms,
-                        execution_url=page.url,
-                        logical_url=logical_url,
-                        page_kind=observation.page_kind,
-                        detail="unknown_page_kind",
-                    )
-                )
-                break
-
-            result.stopped_reason = "no_direct_navigation_available"
+            browser.close()
+    finally:
+        if recorder_provider is not None and recorder_session is not None:
+            recorder_session = recorder_provider.stop(recorder_session)
+            result.recorder_session = recorder_session
             result.events.append(
                 RunnerEvent(
-                    event_type=RunnerEventType.RUN_STOPPED,
-                    timestamp_ms=timestamp_ms,
-                    execution_url=page.url,
-                    logical_url=logical_url,
-                    page_kind=observation.page_kind,
-                    detail=result.stopped_reason,
-                )
-            )
-            break
-        else:
-            result.stopped_reason = "max_steps_exceeded"
-            result.events.append(
-                RunnerEvent(
-                    event_type=RunnerEventType.RUN_STOPPED,
+                    event_type=RunnerEventType.RECORDER_STOP,
                     timestamp_ms=_timestamp_ms(start),
-                    detail=result.stopped_reason,
+                    detail=recorder_session.provider_name,
                 )
             )
-
-        browser.close()
 
     return result
