@@ -20,6 +20,8 @@ from som_seedtalent_capture.pilot_manifests import FailureCategory
 _LIVE_PAGE_WAIT_TIMEOUT_MS = 15000
 _LIVE_PAGE_WAIT_POLL_MS = 500
 _REPEATED_STATE_THRESHOLD = 3
+_LOADING_STATE_RETRY_THRESHOLD = 5
+_LOADING_STATE_WAIT_MS = 1500
 _LOADING_TOKENS = (
     "loading",
     "please wait",
@@ -851,6 +853,7 @@ def run_visible_session_autopilot(
     start = perf_counter()
     repeated_signature: str | None = None
     repeated_count = 0
+    loading_retry_count = 0
     quiz_controller = LiveQuizController(mode=plan.quiz_mode)
     result.events.append(
         RunnerEvent(
@@ -929,29 +932,35 @@ def run_visible_session_autopilot(
                     ]
                 )
 
-                signature = _state_signature(snapshot, observation)
-                if signature == repeated_signature:
-                    repeated_count += 1
+                if observation.page_kind in {PageKind.COURSE_SHELL_LOADING, PageKind.SCORM_FRAME_LOADING}:
+                    loading_retry_count += 1
+                    repeated_signature = None
+                    repeated_count = 0
                 else:
-                    repeated_signature = signature
-                    repeated_count = 1
+                    loading_retry_count = 0
+                    signature = _state_signature(snapshot, observation)
+                    if signature == repeated_signature:
+                        repeated_count += 1
+                    else:
+                        repeated_signature = signature
+                        repeated_count = 1
 
-                if repeated_count >= _REPEATED_STATE_THRESHOLD:
-                    result.unknown_ui_state_detected = True
-                    result.failure_category = FailureCategory.REPEATED_SAME_STATE
-                    result.stopped_reason = "repeated_same_state"
-                    result.events.append(
-                        RunnerEvent(
-                            event_type=RunnerEventType.RUN_STOPPED,
-                            timestamp_ms=timestamp_ms,
-                            execution_url=page.url,
-                            logical_url=logical_url,
-                            page_kind=observation.page_kind,
-                            detail=result.stopped_reason,
-                            screenshot_uri=snapshot.screenshot_uri,
+                    if repeated_count >= _REPEATED_STATE_THRESHOLD:
+                        result.unknown_ui_state_detected = True
+                        result.failure_category = FailureCategory.REPEATED_SAME_STATE
+                        result.stopped_reason = "repeated_same_state"
+                        result.events.append(
+                            RunnerEvent(
+                                event_type=RunnerEventType.RUN_STOPPED,
+                                timestamp_ms=timestamp_ms,
+                                execution_url=page.url,
+                                logical_url=logical_url,
+                                page_kind=observation.page_kind,
+                                detail=result.stopped_reason,
+                                screenshot_uri=snapshot.screenshot_uri,
+                            )
                         )
-                    )
-                    break
+                        break
 
                 decision = decide_next_action(observation)
                 _record_decision(result, observation, decision, logical_url)
@@ -986,6 +995,9 @@ def run_visible_session_autopilot(
                     break
 
                 if observation.page_kind == PageKind.COURSE_SHELL_LOADING:
+                    if loading_retry_count < _LOADING_STATE_RETRY_THRESHOLD:
+                        page.wait_for_timeout(_LOADING_STATE_WAIT_MS)
+                        continue
                     result.failure_category = FailureCategory.SHELL_READY_BUT_FRAME_LOADING
                     result.stopped_reason = "course_shell_loading"
                     result.events.append(
@@ -1002,6 +1014,9 @@ def run_visible_session_autopilot(
                     break
 
                 if observation.page_kind == PageKind.SCORM_FRAME_LOADING:
+                    if loading_retry_count < _LOADING_STATE_RETRY_THRESHOLD:
+                        page.wait_for_timeout(_LOADING_STATE_WAIT_MS)
+                        continue
                     result.failure_category = FailureCategory.SCORM_FRAME_NOT_READY
                     result.stopped_reason = "scorm_frame_loading"
                     result.events.append(
