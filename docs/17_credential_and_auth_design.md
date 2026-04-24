@@ -33,7 +33,8 @@ If storage state expires or MFA is required, the bot stops, records `auth_expire
 
 - Do not commit storage state.
 - Do not log cookies, tokens, passwords, MFA codes, or auth-state JSON.
-- Put `.secrets/`, `playwright/.auth/`, and storage state paths in `.gitignore`.
+- Keep real storage state under an external local secret root such as `C:\dev\_secrets\learning-capture-pipeline\`.
+- Put any repo-local fallback paths such as `.secrets/` and `playwright/.auth/` in `.gitignore`.
 - Use a dedicated capture account.
 - Prefer account-level permissions limited to the approved course/report scope.
 - Record the account alias, not the raw credential, in audit metadata.
@@ -52,3 +53,12 @@ Before a capture batch:
 7. record status.
 
 If preflight fails, do not start the recorder or capture content. Create an auth exception.
+
+## First live-pilot defaults
+
+- auth mode: `manual_storage_state`
+- account alias: `seedtalent-capture-bot`
+- permission manifest path: `C:\dev\_secrets\learning-capture-pipeline\manifests\permission_manifest.yaml`
+- storage state path: `C:\dev\_secrets\learning-capture-pipeline\playwright\storage-state.json`
+- approved course list path: `C:\dev\_secrets\learning-capture-pipeline\inputs\approved_courses.yaml`
+- local artifact root: `C:\dev\_capture_artifacts\learning_capture_pipeline\`

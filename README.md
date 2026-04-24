@@ -111,7 +111,29 @@ Never commit:
 - real SeedTalent content
 - employee PII
 
-Use only placeholder/example manifests in `config/`, keep runtime auth state under ignored local paths such as `.secrets/`, and keep raw capture outputs in ignored local artifact storage.
+Use only placeholder/example manifests in `config/`, keep runtime auth state under external local paths such as `C:\dev\_secrets\learning-capture-pipeline\`, and keep raw capture outputs in external local artifact storage such as `C:\dev\_capture_artifacts\learning_capture_pipeline\`.
+
+## Pre-login real-pilot readiness
+
+The fake-fixture slice is complete. Before live SeedTalent login is available, the repo now supports a repo-safe pre-login pilot path:
+
+- external runtime pilot config via [config/runtime_pilot.example.yaml](/C:/dev/Learning%20Capture%20Pipeline/config/runtime_pilot.example.yaml)
+- external approved-course intake via [config/approved_courses.example.yaml](/C:/dev/Learning%20Capture%20Pipeline/config/approved_courses.example.yaml)
+- runtime manifest loading from the configured external secret root
+- auth bootstrap path preparation and auth preflight commands
+- local-first artifact layout outside the repo
+- pilot plan generation from approved-course input
+
+Typical command sequence once the runtime config is copied to a local external path:
+
+```bash
+som-capture pilot validate-config --config <runtime-config.yaml>
+som-capture pilot bootstrap-auth --config <runtime-config.yaml>
+som-capture pilot auth-preflight --config <runtime-config.yaml> --headed
+som-capture pilot discovery --config <runtime-config.yaml> --headed
+som-capture pilot plans-from-approved --config <runtime-config.yaml>
+som-capture scheduler dry-run --config <runtime-config.yaml>
+```
 
 ## Repo map
 
