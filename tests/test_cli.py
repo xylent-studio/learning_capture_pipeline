@@ -1,8 +1,11 @@
+import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from som_seedtalent_capture.cli import app
+from som_seedtalent_capture.auth import AuthMode, AuthPreflightResult, AuthPreflightStatus
 
 runner = CliRunner()
 
@@ -123,6 +126,13 @@ def test_pilot_plans_from_approved_writes_bundle(tmp_path: Path):
     assert '"plans"' in payload
 
 
+def _write_plan_bundle(tmp_path: Path, config_path: Path) -> Path:
+    out = tmp_path / "plans.json"
+    result = runner.invoke(app, ["pilot", "plans-from-approved", "--config", str(config_path), "--out", str(out)])
+    assert result.exit_code == 0
+    return out
+
+
 def test_scheduler_dry_run_writes_summary(tmp_path: Path):
     config_path = _write_runtime_config(tmp_path)
     out = tmp_path / "scheduler.json"
@@ -132,3 +142,121 @@ def test_scheduler_dry_run_writes_summary(tmp_path: Path):
     assert result.exit_code == 0
     assert out.exists()
     assert '"total_courses": 1' in out.read_text()
+
+
+def test_pilot_run_course_writes_failure_bundle_when_auth_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    config_path = _write_runtime_config(tmp_path)
+    plan_bundle_path = _write_plan_bundle(tmp_path, config_path)
+    out = tmp_path / "run-summary.json"
+    monkeypatch.setattr(
+        "som_seedtalent_capture.pilot_runtime.run_auth_preflight",
+        lambda **kwargs: AuthPreflightResult(
+            mode=AuthMode.MANUAL_STORAGE_STATE,
+            status=AuthPreflightStatus.AUTH_EXPIRED,
+            checked_base_url=kwargs["base_url"],
+            storage_state_path=str(kwargs["storage_state_path"]),
+            account_alias=kwargs["account_alias"],
+            current_url="https://app.seedtalent.com/login",
+            error_reason="auth_expired",
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["pilot", "run-course", "--config", str(config_path), "--plan-bundle", str(plan_bundle_path), "--out", str(out)],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["status"] == "preflight_failed"
+    assert payload["failure_bundle_path"] is not None
+
+
+def test_pilot_run_course_respects_course_url_selection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    config_path = _write_runtime_config(tmp_path)
+    plan_bundle_path = _write_plan_bundle(tmp_path, config_path)
+    out = tmp_path / "run-summary.json"
+    monkeypatch.setattr(
+        "som_seedtalent_capture.pilot_runtime.run_auth_preflight",
+        lambda **kwargs: AuthPreflightResult(
+            mode=AuthMode.MANUAL_STORAGE_STATE,
+            status=AuthPreflightStatus.AUTHENTICATED,
+            checked_base_url=kwargs["base_url"],
+            storage_state_path=str(kwargs["storage_state_path"]),
+            account_alias=kwargs["account_alias"],
+            current_url="https://app.seedtalent.com/catalog",
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "pilot",
+            "run-course",
+            "--config",
+            str(config_path),
+            "--plan-bundle",
+            str(plan_bundle_path),
+            "--course-url",
+            "https://app.seedtalent.com/courses/pilot-course",
+            "--out",
+            str(out),
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["status"] == "ready_for_live_capture"
+
+
+def test_pilot_run_batch_blocks_all_runs_on_batch_preflight_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    config_path = _write_runtime_config(tmp_path)
+    plan_bundle_path = _write_plan_bundle(tmp_path, config_path)
+    out = tmp_path / "batch-summary.json"
+    monkeypatch.setattr(
+        "som_seedtalent_capture.pilot_runtime.run_auth_preflight",
+        lambda **kwargs: AuthPreflightResult(
+            mode=AuthMode.MANUAL_STORAGE_STATE,
+            status=AuthPreflightStatus.AUTH_EXPIRED,
+            checked_base_url=kwargs["base_url"],
+            storage_state_path=str(kwargs["storage_state_path"]),
+            current_url="https://app.seedtalent.com/login",
+            error_reason="auth_expired",
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["pilot", "run-batch", "--config", str(config_path), "--plan-bundle", str(plan_bundle_path), "--out", str(out)],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["batch_summary"]["status"] == "preflight_failed"
+    assert payload["scheduler_summary"]["blocked_by_auth_count"] == 1
+
+
+def test_pilot_run_batch_marks_runs_ready_for_live_capture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    config_path = _write_runtime_config(tmp_path)
+    plan_bundle_path = _write_plan_bundle(tmp_path, config_path)
+    out = tmp_path / "batch-summary.json"
+    monkeypatch.setattr(
+        "som_seedtalent_capture.pilot_runtime.run_auth_preflight",
+        lambda **kwargs: AuthPreflightResult(
+            mode=AuthMode.MANUAL_STORAGE_STATE,
+            status=AuthPreflightStatus.AUTHENTICATED,
+            checked_base_url=kwargs["base_url"],
+            storage_state_path=str(kwargs["storage_state_path"]),
+            current_url="https://app.seedtalent.com/catalog",
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["pilot", "run-batch", "--config", str(config_path), "--plan-bundle", str(plan_bundle_path), "--out", str(out)],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["batch_summary"]["status"] == "ready_for_live_capture"
+    assert payload["scheduler_summary"]["ready_for_live_capture_count"] == 1

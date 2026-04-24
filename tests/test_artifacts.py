@@ -44,3 +44,20 @@ def test_local_artifact_store_slugifies_empty_names(tmp_path: Path):
     )
 
     assert record.local_path.endswith("artifact.json")
+
+
+def test_local_artifact_store_builds_screenshot_directory_record(tmp_path: Path):
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    layout = store.ensure_run_layout(
+        batch_id="batch-003",
+        run_id="run-003",
+        course_title="Pilot Course",
+    )
+
+    record = store.build_directory_record(
+        layout=layout,
+        kind=ArtifactKind.SCREENSHOT_FOLDER,
+    )
+
+    assert record.local_path.endswith("screenshots")
+    assert record.metadata["artifact_type"] == "directory"

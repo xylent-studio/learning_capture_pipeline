@@ -3,14 +3,16 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import Error, sync_playwright
 
+from som_seedtalent_capture.artifacts import ArtifactKind, LocalArtifactStore
 from som_seedtalent_capture.autopilot.capture_plan import build_fixture_capture_plan_from_file
 from som_seedtalent_capture.autopilot.course_discovery import discover_fixture_courses_from_file
 from som_seedtalent_capture.autopilot.media_controller import FixtureMediaController
-from som_seedtalent_capture.autopilot.qa import AutopilotReadinessStatus, RecaptureReason, evaluate_autopilot_run
+from som_seedtalent_capture.autopilot.qa import AutopilotReadinessStatus, RecaptureReason, evaluate_autopilot_run, evaluate_pilot_run_manifest
 from som_seedtalent_capture.autopilot.quiz_controller import FixtureQuizController
 from som_seedtalent_capture.autopilot.recorder import FakeRecorderProvider
 from som_seedtalent_capture.autopilot.runner import run_fixture_autopilot
 from som_seedtalent_capture.permissions import load_permission_manifest
+from som_seedtalent_capture.pilot_manifests import PilotRunManifest, PilotRunStatus, RunDiagnosticsSnapshot
 
 
 FIXTURE_ROOT = Path("tests/fixtures/fake_seedtalent")
@@ -108,3 +110,59 @@ def test_evaluate_autopilot_run_recapture_reasons(successful_run_bundle, reason:
 
     assert qa_result.readiness_status == AutopilotReadinessStatus.NEEDS_RECAPTURE
     assert reason in qa_result.recapture_reasons
+
+
+def _pilot_run_manifest(tmp_path: Path, *, lifecycle_status: PilotRunStatus = PilotRunStatus.READY_FOR_LIVE_CAPTURE) -> PilotRunManifest:
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    layout = store.ensure_run_layout(batch_id="batch-qa", run_id="run-qa", course_title="Pilot Course")
+    planned_artifacts = [
+        store.build_record(layout=layout, kind=ArtifactKind.PREFLIGHT_CAPTURE, name="auth-preflight", extension="png"),
+        store.build_record(layout=layout, kind=ArtifactKind.DIAGNOSTIC_SNAPSHOT, name="diagnostics-snapshot", extension="json"),
+        store.build_record(layout=layout, kind=ArtifactKind.QA_REPORT, name="qa-report", extension="json"),
+        store.build_directory_record(layout=layout, kind=ArtifactKind.SCREENSHOT_FOLDER),
+    ]
+    Path(planned_artifacts[0].local_path).write_text("preflight", encoding="utf-8")
+    Path(planned_artifacts[1].local_path).write_text("diagnostics", encoding="utf-8")
+    return PilotRunManifest(
+        batch_id="batch-qa",
+        course_title="Pilot Course",
+        source_url="https://app.seedtalent.com/courses/pilot-course",
+        permission_basis="seedtalent_contract_full_use",
+        rights_status="seedtalent_contract_full_use",
+        account_alias="seedtalent-capture-bot",
+        lifecycle_status=lifecycle_status,
+        artifact_layout=layout,
+        planned_artifacts=planned_artifacts,
+        runtime_config_path=str(tmp_path / "runtime.yaml"),
+        page_observation_count=0,
+        runner_executed=False,
+        diagnostics_snapshot=RunDiagnosticsSnapshot(),
+        qa_report_path=planned_artifacts[2].local_path,
+    )
+
+
+def test_evaluate_pilot_run_manifest_returns_ready_for_live_capture(tmp_path: Path):
+    manifest = _pilot_run_manifest(tmp_path)
+
+    qa_result = evaluate_pilot_run_manifest(run_manifest=manifest)
+
+    assert qa_result.readiness_status == AutopilotReadinessStatus.READY_FOR_LIVE_CAPTURE
+    assert qa_result.recapture_reasons == []
+    assert RecaptureReason.RUNNER_NOT_EXECUTED.value in qa_result.warnings
+
+
+def test_evaluate_pilot_run_manifest_flags_preflight_and_artifact_failures(tmp_path: Path):
+    manifest = _pilot_run_manifest(tmp_path, lifecycle_status=PilotRunStatus.PREFLIGHT_FAILED).model_copy(
+        update={
+            "preflight_status": "auth_expired",
+            "diagnostics_snapshot": RunDiagnosticsSnapshot(prohibited_path_detected=True, prohibited_path_hits=["/settings"]),
+        },
+        deep=True,
+    )
+    Path(manifest.artifact_layout.preflight_dir, "auth-preflight.png").unlink(missing_ok=True)
+
+    qa_result = evaluate_pilot_run_manifest(run_manifest=manifest)
+
+    assert qa_result.readiness_status == AutopilotReadinessStatus.NEEDS_RECAPTURE
+    assert RecaptureReason.PREFLIGHT_FAILED in qa_result.recapture_reasons
+    assert RecaptureReason.PROHIBITED_PATH_DETECTED in qa_result.recapture_reasons
