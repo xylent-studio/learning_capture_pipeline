@@ -1,3 +1,11 @@
+from som_seedtalent_capture.autopilot.capture_plan import (
+    CapturePlan,
+    QaThresholds,
+    QuizCaptureMode,
+    RecorderProfile,
+    build_fixture_capture_plan,
+    build_fixture_capture_plan_from_file,
+)
 from som_seedtalent_capture.autopilot.course_discovery import (
     CourseDiscoveryResult,
     CourseInventoryItem,
@@ -20,6 +28,7 @@ from som_seedtalent_capture.autopilot.state_machine import (
 
 __all__ = [
     "AutopilotState",
+    "CapturePlan",
     "CourseDiscoveryResult",
     "CourseInventoryItem",
     "DiscoveredCourseCard",
@@ -27,7 +36,12 @@ __all__ = [
     "NavigationAction",
     "PageKind",
     "PageObservation",
+    "QaThresholds",
+    "QuizCaptureMode",
+    "RecorderProfile",
     "VisibleDomSnapshot",
+    "build_fixture_capture_plan",
+    "build_fixture_capture_plan_from_file",
     "classify_fixture_page",
     "decide_next_action",
     "discover_fixture_courses",
