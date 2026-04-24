@@ -1,0 +1,40 @@
+permission_manifest_id: som_seedtalent_contract_2026_example
+permission_basis: seedtalent_contract_full_use
+contract_reference: "REPLACE_WITH_INTERNAL_CONTRACT_OR_SOW_REFERENCE"
+effective_date: "2026-04-24"
+expires_at: null
+source_platform: seedtalent
+source_base_url: "https://app.seedtalent.com"
+default_rights_status: seedtalent_contract_full_use
+ai_use_allowed: true
+derivative_use_allowed: true
+internal_training_use_allowed: true
+screen_capture_allowed: true
+visible_dom_capture_allowed: true
+audio_capture_allowed: true
+video_capture_allowed: true
+quiz_capture_allowed: true
+report_capture_allowed: true
+allowed_accounts:
+  - alias: seedtalent-capture-bot
+    purpose: autonomous_capture
+    notes: "Dedicated capture account. Do not use employee production identity if avoidable."
+allowed_vendors:
+  - vendor_name: "*"
+    permission_status: authorized_by_contract_or_vendor_permission
+    scope: covered_seedtalent_training_content
+allowed_course_patterns:
+  - "*"
+excluded_paths:
+  - "/settings"
+  - "/billing"
+  - "/account"
+  - "/messages"
+  - "/support"
+pii_policy:
+  learner_report_data_separate_from_training_content: true
+  do_not_embed_raw_employee_names: true
+  hash_employee_identifiers: true
+notes: >
+  Replace this sample with the real State of Mind permission manifest.
+  The system should treat covered content as authorized, while preserving audit metadata.

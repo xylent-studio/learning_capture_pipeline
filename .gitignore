@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+
+# Local secrets and auth state
+.env
+.env.*
+!.env.example
+*.secret
+*.key
+storage_state*.json
+*.cookies.json
+
+# Captures and artifacts - never commit production content
+captures/
+artifacts/
+raw-recordings/
+processed-artifacts/
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.mp3
+*.m4a
+*.png
+*.jpg
+*.jpeg
+
+# Node / frontend later
+node_modules/
+dist/
+build/
+.next/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime auth/secrets for autonomous capture
+.secrets/
+playwright/.auth/
+auth-state.json
