@@ -76,6 +76,13 @@ def _extract_question_text(body_text: str, headings: list[str], options: list[st
     candidate_lines = [line.strip() for line in body_text.splitlines() if line.strip()]
     option_set = {option.strip() for option in options}
 
+    option_positions = [body_text.find(option) for option in options if option in body_text]
+    if option_positions:
+        prefix = body_text[: min(option_positions)].strip()
+        prefix = re.sub(r"^Question\s+\d+/\d+\s*", "", prefix, flags=re.IGNORECASE).strip()
+        if prefix and prefix.lower() not in {"quiz results", "submit", "next", "take again"}:
+            return prefix
+
     for line in candidate_lines:
         lowered = line.lower()
         if line in option_set:
@@ -114,6 +121,23 @@ def _extract_score_text(body_text: str) -> str | None:
     if "failed" in lowered:
         return "failed"
     return None
+
+
+def _extract_active_question_scope(body_text: str) -> str:
+    matches = list(re.finditer(r"Question\s+\d+/\d+", body_text, re.IGNORECASE))
+    if not matches:
+        return body_text
+    start = matches[-1].start()
+    remainder = body_text[start:]
+    results_match = re.search(r"\bQuiz Results\b", remainder, re.IGNORECASE)
+    if results_match:
+        return remainder[: results_match.start()].strip()
+    return remainder.strip()
+
+
+def _filter_options_for_active_scope(options: list[str], question_scope_text: str) -> list[str]:
+    filtered = [option for option in options if option and option in question_scope_text]
+    return filtered or options
 
 
 def _build_retry_feedback_map(feedback_text: str, options: list[str]) -> tuple[list[str], list[str]]:
@@ -349,10 +373,12 @@ class LiveQuizController:
     ) -> QuizCaptureResult:
         del logical_url
         body_text = surface.locator("body").inner_text().strip()
+        question_scope_text = _extract_active_question_scope(body_text)
         headings = [text.strip() for text in surface.locator("h1:visible, h2:visible, h3:visible").all_inner_texts() if text.strip()]
-        options = _visible_label_texts(surface)
+        options = _filter_options_for_active_scope(_visible_label_texts(surface), question_scope_text)
         controls = _visible_button_texts(surface)
-        question_text = _extract_question_text(body_text, headings, options)
+        active_headings = [heading for heading in headings if heading.lower().startswith("question")]
+        question_text = _extract_question_text(question_scope_text, active_headings[-1:] or headings[-1:], options)
         question_key = question_text or observation.url
         attempt_number = self._question_attempts.get(question_key, 0) + (1 if observation.page_kind == PageKind.QUIZ_QUESTION else 0)
         question_screenshot_uri = _capture_screenshot(page, screenshot_dir, "quiz-state", timestamp_ms)
@@ -430,7 +456,7 @@ class LiveQuizController:
             and self.history[-1].answer_strategy == "feedback_retry_reset"
             and self.history[-1].question_text == question_text
         )
-        if _has_retry_feedback_markers(body_text):
+        if _has_retry_feedback_markers(question_scope_text):
             clicked_progression = _click_progression_control(surface, page, [rf"^{label}$" for label in _ALLOWED_RESULTS_CONTROLS])
             if clicked_progression is not None:
                 result = QuizCaptureResult(
@@ -438,8 +464,8 @@ class LiveQuizController:
                     page_kind=observation.page_kind,
                     question_text=question_text,
                     options=options,
-                    feedback_text=body_text,
-                    score_text=_extract_score_text(body_text),
+                    feedback_text=question_scope_text,
+                    score_text=_extract_score_text(question_scope_text),
                     progression_controls=controls,
                     question_screenshot_uri=question_screenshot_uri,
                     feedback_screenshot_uri=_capture_screenshot(page, screenshot_dir, "quiz-feedback", timestamp_ms),
@@ -455,15 +481,15 @@ class LiveQuizController:
                 self.history.append(result)
                 return result
 
-        if _has_retry_feedback_markers(body_text) and any(control.lower() == "take again" for control in controls) and not retry_reset_recent:
+        if _has_retry_feedback_markers(question_scope_text) and any(control.lower() == "take again" for control in controls) and not retry_reset_recent:
             clicked_retry = _click_progression_control(surface, page, ["take again"])
             result = QuizCaptureResult(
                 mode=self.mode,
                 page_kind=observation.page_kind,
                 question_text=question_text,
                 options=options,
-                feedback_text=body_text,
-                score_text=_extract_score_text(body_text),
+                feedback_text=question_scope_text,
+                score_text=_extract_score_text(question_scope_text),
                 progression_controls=controls,
                 question_screenshot_uri=question_screenshot_uri,
                 feedback_screenshot_uri=_capture_screenshot(page, screenshot_dir, "quiz-feedback", timestamp_ms),

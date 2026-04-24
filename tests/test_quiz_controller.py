@@ -617,6 +617,107 @@ def test_live_quiz_controller_prefers_next_over_retry_on_feedback_marked_questio
     assert result.advanced_to_next is True
 
 
+def test_live_quiz_controller_uses_active_question_scope_when_multiple_questions_exist(tmp_path: Path):
+    class _StaticLocator:
+        def __init__(self, *, body_text: str = "", values: list[str] | None = None) -> None:
+            self._body_text = body_text
+            self._values = values or []
+
+        def inner_text(self) -> str:
+            return self._body_text
+
+        def all_inner_texts(self) -> list[str]:
+            return self._values
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            return 0
+
+        def filter(self, has_text):  # noqa: ANN001
+            del has_text
+            return self
+
+    question_two_options = [
+        "Are passionate about quality",
+        "Are regular cannabis users",
+        "Seek unique flower characteristics",
+        "Seek premium price points",
+        "Appreciate accessible pricing",
+    ]
+
+    class _FakeSurface:
+        def locator(self, selector: str):
+            if selector == "body":
+                return _StaticLocator(
+                    body_text=(
+                        "Incorrect. Correct answer: The ability to bring unique strains and products to market at an affordable price point. "
+                        "Question 01/02 What is important to the Seed & Strain Growers? "
+                        "Question 02/02 Seed & Strain consumers... (select all that apply) "
+                        "Are passionate about quality Are regular cannabis users Seek unique flower characteristics "
+                        "Seek premium price points Appreciate accessible pricing Submit Next Quiz Results"
+                    )
+                )
+            if selector == "h1:visible, h2:visible, h3:visible":
+                return _StaticLocator(values=["Question 01/02", "Question 02/02", "Quiz Results"])
+            if selector == "label:visible":
+                return _StaticLocator(
+                    values=[
+                        "The ability to bring unique strains and products to market at an affordable price point.",
+                        "Clean and well-run cultivation centers",
+                        "The highest THC %",
+                        *question_two_options,
+                    ]
+                )
+            if selector == "button:visible":
+                return _StaticLocator(values=["SUBMIT"])
+            if selector == "button, a, [role='button']":
+                return _StaticLocator(values=[])
+            raise AssertionError(selector)
+
+        def get_by_label(self, pattern):  # noqa: ANN001
+            del pattern
+
+            class _NoopLabel:
+                @property
+                def first(self):
+                    return self
+
+                def count(self):
+                    return 0
+
+                def click(self, force: bool = False):  # noqa: ARG002
+                    return None
+
+            return _NoopLabel()
+
+    class _FakePage:
+        url = "https://app.seedtalent.com/course/example"
+
+        def screenshot(self, path: str, full_page: bool = True):  # noqa: ARG002
+            Path(path).write_text("image", encoding="utf-8")
+
+        def wait_for_timeout(self, timeout_ms: int):  # noqa: ARG002
+            return None
+
+    controller = LiveQuizController(mode=QuizCaptureMode.CAPTURE_AND_COMPLETE_ON_CAPTURE_ACCOUNT)
+    result = controller.run(
+        page=_FakePage(),
+        surface=_FakeSurface(),
+        observation=PageObservation(url="https://app.seedtalent.com/course/example", page_kind=PageKind.QUIZ_QUESTION),
+        screenshot_dir=tmp_path,
+        logical_url="https://app.seedtalent.com/course/example",
+        timestamp_ms=990,
+        evidence_snippets=[],
+    )
+
+    assert result.question_text == "Seed & Strain consumers... (select all that apply)"
+    assert result.options == question_two_options
+    assert result.answer_strategy == "fallback_select_all"
+
+
 def test_runner_reaches_completion_with_real_quiz_controller(tmp_path: Path):
     _ensure_chromium_or_skip()
 
